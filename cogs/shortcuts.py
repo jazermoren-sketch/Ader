@@ -82,18 +82,15 @@ class Shortcuts(commands.Cog):
             while draw.textbbox((0,0),text,font=f)[2]>max_width and size>14:
                 size-=1; f=font(size,bold)
             return f
-        # Overlay the dynamic values while preserving the supplied template artwork.
         w,h=base.size
         card_font=font(max(18,min(30,w//28)),True)
         small=font(max(14,min(22,w//38)),False)
         white=(255,255,255,255); dark=(25,25,30,235)
-        # A readable information panel is drawn over the lower part of the template.
         panel_top=int(h*0.47); panel_bottom=h-30
         draw.rounded_rectangle((35,panel_top,w-35,panel_bottom),radius=24,fill=dark)
-        avatar=member.display_avatar
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(str(avatar.url),timeout=aiohttp.ClientTimeout(total=10)) as response:
+                async with session.get(str(member.display_avatar.url),timeout=aiohttp.ClientTimeout(total=10)) as response:
                     avatar_bytes=await response.read()
             av=Image.open(io.BytesIO(avatar_bytes)).convert("RGBA").resize((150,150))
             mask=Image.new("L",av.size,0); ImageDraw.Draw(mask).ellipse((0,0,149,149),fill=255)
@@ -102,6 +99,9 @@ class Shortcuts(commands.Cog):
             pass
         x=230; y=panel_top+28; maxw=w-x-55
         draw.text((x,y),str(member),font=fit(str(member),maxw,32,True),fill=white); y+=48
+        # Discord role accounting: @everyone is a role object too, so exclude it from both totals.
+        server_role_count=max(0,len(member.guild.roles)-1)
+        member_role_count=sum(1 for role in member.roles if role != member.guild.default_role)
         values=[
             f"Username: {member.name}",
             f"ID: {member.id}",
@@ -110,7 +110,8 @@ class Shortcuts(commands.Cog):
             f"Administrator: {'Yes' if member.guild_permissions.administrator else 'No'}",
             f"Server Owner: {'Yes' if member.id==member.guild.owner_id else 'No'}",
             f"Bot: {'Yes' if member.bot else 'No'}",
-            f"Server Roles: {max(0,len(member.guild.roles)-1)} | Member Roles: {max(0,len(member.roles)-1)}",
+            f"Server Roles: {server_role_count}",
+            f"Member Roles: {member_role_count}",
             "Nova Aro",
         ]
         for value in values:
