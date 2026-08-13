@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -13,7 +14,6 @@ from PIL import Image, ImageDraw, ImageFont
 
 SHORTCUTS={"give_role":"إعطاء رتبة","lock":"قفل الروم","unlock":"فتح الروم","timeout":"تايم اوت","untimeout":"الغاء تايم اوت","kick":"طرد","ban":"بان","warn":"تحذير","member_info":"معلومات العضو"}
 DEFAULT_ALIASES={"give_role":"!رتبة","lock":"!قفل","unlock":"!فتح","timeout":"!تايم اوت","untimeout":"!الغاء تايم اوت","kick":"!طرد","ban":"!بان","warn":"!تحذير","member_info":"!معلومات العضو"}
-INFO_IMAGE="https://cdn.discordapp.com/attachments/1517582979923185825/1537503900859633744/info-member.png"
 
 class ShortcutSelect(discord.ui.Select):
     def __init__(self,cog,hidden):
@@ -62,63 +62,131 @@ class Shortcuts(commands.Cog):
     async def show_editor(self,interaction,key,hidden):
         embed=discord.Embed(title=f"إعدادات اختصار {SHORTCUTS[key]}",color=discord.Color.blurple()); embed.description=f"الاختصار الحالي: `{self.get_alias(interaction.guild.id,key)}`"; await interaction.response.edit_message(embed=embed,view=ShortcutEditor(self,key,hidden))
 
+    @staticmethod
+    def _font(size,bold=False,arabic=False):
+        candidates=[]
+        if arabic:
+            candidates=["/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf"]
+        candidates += ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
+        for path in candidates:
+            try:return ImageFont.truetype(path,size)
+            except OSError:pass
+        return ImageFont.load_default()
+
+    @staticmethod
+    def _fit(draw,text,max_width,size,bold=False,arabic=False):
+        while size>12:
+            f=Shortcuts._font(size,bold,arabic)
+            if draw.textbbox((0,0),text,font=f,direction="rtl" if arabic else None)[2] <= max_width:return f
+            size-=1
+        return Shortcuts._font(size,bold,arabic)
+
+    @staticmethod
+    def _text(draw,xy,text,font,fill=(255,255,255,255),anchor="la",arabic=False):
+        draw.text(xy,text,font=font,fill=fill,anchor=anchor,direction="rtl" if arabic else None,language="ar" if arabic else None)
+
+    @staticmethod
+    def _toggle(draw,x,y,enabled):
+        track=(42,184,96,255) if enabled else (54,52,72,255)
+        knob=(245,245,250,255) if enabled else (177,177,195,255)
+        draw.rounded_rectangle((x,y,x+88,y+44),radius=22,fill=track)
+        cx=x+66 if enabled else x+22
+        draw.ellipse((cx-15,y+7,cx+15,y+37),fill=knob)
+
+    @staticmethod
+    def _age(created):
+        now=datetime.now(timezone.utc)
+        months=(now.year-created.year)*12+(now.month-created.month)
+        if now.day<created.day: months-=1
+        months=max(0,months)
+        days=(now-created).days
+        return f"{months}month {days%30}day"
+
     async def build_member_card(self,member:discord.Member):
-        """Generate the member information image dynamically from the supplied member."""
-        async with aiohttp.ClientSession() as session:
-            async with session.get(INFO_IMAGE,timeout=aiohttp.ClientTimeout(total=10)) as response:
-                if response.status != 200: raise RuntimeError("تعذر تحميل قالب معلومات العضو")
-                data=await response.read()
-        base=Image.open(io.BytesIO(data)).convert("RGBA")
-        draw=ImageDraw.Draw(base)
-        font_paths=["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf","/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"]
-        bold_paths=["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf","/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"]
-        def font(size,bold=False):
-            for p in bold_paths if bold else font_paths:
-                try:return ImageFont.truetype(p,size)
-                except OSError:pass
-            return ImageFont.load_default()
-        def fit(text,max_width,size=30,bold=False):
-            f=font(size,bold)
-            while draw.textbbox((0,0),text,font=f)[2]>max_width and size>14:
-                size-=1; f=font(size,bold)
-            return f
-        w,h=base.size
-        card_font=font(max(18,min(30,w//28)),True)
-        small=font(max(14,min(22,w//38)),False)
-        white=(255,255,255,255); dark=(25,25,30,235)
-        panel_top=int(h*0.47); panel_bottom=h-30
-        draw.rounded_rectangle((35,panel_top,w-35,panel_bottom),radius=24,fill=dark)
+        """Generate a 1536x1024 Nova Aro member-information card dynamically."""
+        W,H=1536,1024
+        img=Image.new("RGBA",(W,H),(8,3,20,255)); d=ImageDraw.Draw(img)
+        # Background and neon frame.
+        for i in range(8,0,-1):
+            alpha=max(20,100-i*9)
+            d.rounded_rectangle((16+i,16+i,W-16-i,H-16-i),radius=30,outline=(120,40,255,alpha),width=3)
+        d.rounded_rectangle((18,18,W-18,H-18),radius=28,outline=(176,72,255,255),width=3)
+        d.line((52,40,W-52,40),fill=(159,61,255,255),width=7)
+        # Subtle diagonal accents.
+        for x in range(950,1450,120): d.line((x,80,x-260,360),fill=(64,25,115,100),width=3)
+
+        white=(248,248,252,255); purple=(176,130,255,255); green=(38,214,94,255); red=(255,55,80,255)
+        # Avatar ring and avatar.
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(str(member.display_avatar.url),timeout=aiohttp.ClientTimeout(total=10)) as response:
-                    avatar_bytes=await response.read()
-            av=Image.open(io.BytesIO(avatar_bytes)).convert("RGBA").resize((150,150))
-            mask=Image.new("L",av.size,0); ImageDraw.Draw(mask).ellipse((0,0,149,149),fill=255)
-            base.alpha_composite(av,(55,panel_top+25),mask)
-        except Exception:
-            pass
-        x=230; y=panel_top+28; maxw=w-x-55
-        draw.text((x,y),str(member),font=fit(str(member),maxw,32,True),fill=white); y+=48
-        # Discord role accounting: @everyone is a role object too, so exclude it from both totals.
-        server_role_count=max(0,len(member.guild.roles)-1)
-        member_role_count=sum(1 for role in member.roles if role != member.guild.default_role)
-        values=[
-            f"Username: {member.name}",
-            f"ID: {member.id}",
-            f"Discord: {discord.utils.format_dt(member.created_at,'F')}",
-            f"Server: {discord.utils.format_dt(member.joined_at,'F') if member.joined_at else 'غير معروف'}",
-            f"Administrator: {'Yes' if member.guild_permissions.administrator else 'No'}",
-            f"Server Owner: {'Yes' if member.id==member.guild.owner_id else 'No'}",
-            f"Bot: {'Yes' if member.bot else 'No'}",
-            f"Server Roles: {server_role_count}",
-            f"Member Roles: {member_role_count}",
-            "Nova Aro",
-        ]
-        for value in values:
-            draw.text((x,y),value,font=fit(value,maxw,20),fill=white); y+=30
-            if y>panel_bottom-28: break
-        out=io.BytesIO(); base.save(out,format="PNG",optimize=True); out.seek(0)
-        return out
+                async with session.get(str(member.display_avatar.replace(size=256).url),timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    avatar_bytes=await r.read()
+            avatar=Image.open(io.BytesIO(avatar_bytes)).convert("RGBA").resize((330,330))
+            mask=Image.new("L",(330,330),0); ImageDraw.Draw(mask).ellipse((0,0,329,329),fill=255)
+            img.alpha_composite(avatar,(82,58),mask)
+        except Exception: pass
+        for rad,width in [(178,5),(188,3),(196,2)]: d.ellipse((247-rad,223-rad,247+rad,223+rad),outline=(115,30,255,230),width=width)
+
+        # Header.
+        name=str(member)
+        d.text((480,108),name,font=self._fit(d,name,780,72,True),fill=white)
+        d.rounded_rectangle((480,196,650,252),radius=28,fill=(104,35,235,255))
+        self._text(d,(565,224),"Nova Aro",self._font(30,True),white,anchor="mm")
+        self._text(d,(480,286),f"ID: {member.id}",self._font(29),white)
+
+        # Top information panels.
+        panels=[(58,360,525,498),(548,360,995,498),(1018,360,1475,498)]
+        for box in panels:d.rounded_rectangle(box,radius=18,fill=(14,7,29,210),outline=(116,73,170,255),width=2)
+        self._text(d,(292,392),"تاريخ الانضمام للديسكورد",self._font(28,True,True),purple,anchor="ma",arabic=True)
+        self._text(d,(292,448),member.created_at.strftime("%d %b %Y"),self._font(32,True),white,anchor="ma")
+        self._text(d,(771,392),"تاريخ الانضمام للسيرفر",self._font(28,True,True),purple,anchor="ma",arabic=True)
+        self._text(d,(771,448),member.joined_at.strftime("%d %b %Y") if member.joined_at else "Unknown",self._font(32,True),white,anchor="ma")
+        self._text(d,(1246,392),"عمر الحساب",self._font(28,True,True),purple,anchor="ma",arabic=True)
+        self._text(d,(1246,448),self._age(member.created_at),self._font(30,True),white,anchor="ma")
+
+        # Bottom panels.
+        left=(58,518,655,871); mid=(674,518,995,871); right=(1018,518,1475,871)
+        for box in (left,mid,right):d.rounded_rectangle(box,radius=18,fill=(12,6,28,225),outline=(116,73,170,255),width=2)
+        # Status rows.
+        status=[("ADMINISTRATION",member.guild_permissions.administrator,False),("صاحب السيرفر",member.id==member.guild.owner_id,True),("بوت",member.bot,True),("صاحب الصلاحية الأعلى",member.top_role==member.guild.me.top_role if member.guild.me else False,True)]
+        ys=[545,632,719,806]
+        for (label,enabled,arabic),y in zip(status,ys):
+            self._text(d,(154,y+25),label,self._font(25,True,arabic),white,anchor="lm",arabic=arabic)
+            self._text(d,(482,y+25),"نعم" if enabled else "لا",self._font(24,True,True),green if enabled else red,anchor="mm",arabic=True)
+            self._toggle(d,533,y+3,enabled)
+            if y<800:d.line((78,y+73,635,y+73),fill=(75,48,108,255),width=2)
+
+        # Role counts.
+        server_roles=max(0,len(member.guild.roles)-1)
+        member_roles=[r for r in member.roles if r!=member.guild.default_role]
+        self._text(d,(834,565),"الرتب في السيرفر",self._font(27,True,True),purple,anchor="ma",arabic=True)
+        self._text(d,(834,620),str(server_roles),self._font(58,True),white,anchor="ma")
+        d.line((704,668,965,668),fill=(75,48,108,255),width=2)
+        self._text(d,(834,700),"رتب العضو",self._font(27,True,True),purple,anchor="ma",arabic=True)
+        self._text(d,(834,755),str(len(member_roles)),self._font(58,True),white,anchor="ma")
+
+        # Member roles list (up to 6 visible).
+        self._text(d,(1246,552),"رتب العضو",self._font(27,True,True),purple,anchor="ma",arabic=True)
+        visible=member_roles[-6:][::-1]
+        start_y=596
+        for i,role in enumerate(visible):
+            yy=start_y+i*43
+            d.rounded_rectangle((1038,yy,1455,yy+37),radius=12,fill=(19,12,38,235),outline=(73,55,105,220),width=1)
+            rgb=role.color.to_rgb() if role.color.value else (130,130,140)
+            d.ellipse((1054,yy+9,1076,yy+31),fill=(*rgb,255))
+            label=role.name
+            self._text(d,(1090,yy+19),label,self._fit(d,label,345,19,False),white,anchor="lm")
+        if len(member_roles)>6:
+            extra=f"+{len(member_roles)-6} more"
+            self._text(d,(1246,854),extra,self._font(16,True),purple,anchor="ma")
+
+        # Footer.
+        d.line((220,955,585,955),fill=(150,60,255,255),width=3); d.line((950,955,1315,955),fill=(150,60,255,255),width=3)
+        d.ellipse((720,878,816,974),fill=(12,5,30,255),outline=(145,57,255,255),width=3)
+        self._text(d,(768,926),"♛",self._font(43,True),purple,anchor="mm")
+        self._text(d,(768,986),"✦ Nova Aro ✦",self._font(38,True),white,anchor="ms")
+
+        out=io.BytesIO(); img.convert("RGB").save(out,format="JPEG",quality=92,optimize=True); out.seek(0); return out
 
     async def execute(self,ctx,key,argument:Optional[discord.Member]=None,reason=""):
         if not ctx.guild or not isinstance(ctx.author,discord.Member):return
@@ -130,7 +198,7 @@ class Shortcuts(commands.Cog):
         if key=="member_info":
             try:
                 image=await self.build_member_card(argument)
-                return await ctx.send(file=discord.File(image,filename="member-info.png"))
+                return await ctx.send(file=discord.File(image,filename="member-info.jpg"))
             except Exception:
                 return await ctx.send("❌ تعذر إنشاء صورة معلومات العضو حالياً.",delete_after=7)
         if argument==ctx.author or argument==ctx.guild.owner or argument.top_role>=ctx.author.top_role:return await ctx.send("❌ ما تقدرش تستعمل هاد الإجراء على هاد العضو.",delete_after=6)
