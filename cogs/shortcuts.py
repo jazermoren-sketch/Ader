@@ -79,6 +79,33 @@ class Shortcuts(commands.Cog):
     async def show_editor(self,interaction,key,hidden):
         embed=discord.Embed(title=f"إعدادات اختصار {SHORTCUTS[key]}",color=discord.Color.blurple()); embed.description=f"الاختصار الحالي: `{self.get_alias(interaction.guild.id,key)}`"
         await interaction.response.edit_message(embed=embed,view=ShortcutEditor(self,key,hidden))
+    def member_info_embed(self, member: discord.Member) -> discord.Embed:
+        guild = member.guild
+        role_count = len([r for r in member.roles if r != guild.default_role])
+        total_roles = max(0, len(guild.roles) - 1)
+        is_admin = member.guild_permissions.administrator
+        is_owner = member.id == guild.owner_id
+        account_age = discord.utils.utcnow() - member.created_at
+        days = max(0, account_age.days)
+        embed = discord.Embed(title="معلومات العضو", color=discord.Color.blurple())
+        embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Username", value=f"`{member.name}`", inline=True)
+        embed.add_field(name="ID", value=f"`{member.id}`", inline=True)
+        embed.add_field(name="تاريخ إنشاء الحساب", value=discord.utils.format_dt(member.created_at, "F"), inline=False)
+        if member.joined_at:
+            embed.add_field(name="تاريخ الانضمام للسيرفر", value=discord.utils.format_dt(member.joined_at, "F"), inline=False)
+        embed.add_field(name="عمر الحساب", value=f"{days} يوم", inline=True)
+        embed.add_field(name="Administrator", value="نعم ✅" if is_admin else "لا ❌", inline=True)
+        embed.add_field(name="صاحب السيرفر", value="نعم 👑" if is_owner else "لا ❌", inline=True)
+        embed.add_field(name="Bot", value="نعم 🤖" if member.bot else "لا 👤", inline=True)
+        embed.add_field(name="رتب السيرفر", value=f"{total_roles}", inline=True)
+        embed.add_field(name="رتب العضو", value=f"{role_count}", inline=True)
+        roles = [r.mention for r in reversed(member.roles) if r != guild.default_role]
+        embed.add_field(name="الرتب", value=", ".join(roles[:20]) if roles else "لا توجد رتب", inline=False)
+        embed.set_image(url=INFO_IMAGE)
+        embed.set_footer(text="Nova Aro")
+        return embed
     async def execute(self,ctx,key,argument:Optional[discord.Member]=None,reason=""):
         if not ctx.guild or not isinstance(ctx.author,discord.Member):return
         if not (ctx.author.guild_permissions.manage_guild or ctx.author.guild_permissions.administrator):return await ctx.send("❌ ما عندكش صلاحية استعمال هاد الاختصار.",delete_after=5)
@@ -86,18 +113,16 @@ class Shortcuts(commands.Cog):
             if not ctx.channel.permissions_for(ctx.guild.me).manage_channels:return await ctx.send("❌ البوت ما عندوش Manage Channels.",delete_after=5)
             await ctx.channel.set_permissions(ctx.guild.default_role,send_messages=False if key=="lock" else None,reason=f"Shortcut by {ctx.author}")
             return await ctx.send("🔒 تم قفل الروم." if key=="lock" else "🔓 تم فتح الروم.")
-        if not argument:return await ctx.send("❌ خاصك تحدد العضو، مثال: `!تايم اوت @عضو`",delete_after=6)
+        if not argument:return await ctx.send("❌ خاصك تحدد العضو، مثال: `!معلومات العضو @عضو`",delete_after=6)
+        if key == "member_info": return await ctx.send(embed=self.member_info_embed(argument))
         if argument==ctx.author or argument==ctx.guild.owner or argument.top_role>=ctx.author.top_role:return await ctx.send("❌ ما تقدرش تستعمل هاد الإجراء على هاد العضو.",delete_after=6)
         try:
-            if key=="give_role":
-                return await ctx.send("ℹ️ الاستعمال: `!رتبة @عضو @رتبة` — خاص تحديد الرتبة المراد إعطاؤها.",delete_after=7)
+            if key=="give_role":return await ctx.send("ℹ️ الاستعمال: `!رتبة @عضو @رتبة` — خاص تحديد الرتبة المراد إعطاؤها.",delete_after=7)
             if key=="timeout":await argument.timeout(discord.utils.utcnow()+discord.timedelta(minutes=10),reason=reason or f"Shortcut by {ctx.author}"); return await ctx.send(f"⏱️ تم إعطاء Timeout لـ {argument.mention} لمدة 10 دقائق.")
             if key=="untimeout":await argument.timeout(None,reason=reason or f"Shortcut by {ctx.author}"); return await ctx.send(f"✅ تم إلغاء Timeout لـ {argument.mention}.")
             if key=="kick":await argument.kick(reason=reason or f"Shortcut by {ctx.author}"); return await ctx.send(f"👢 تم طرد {argument.mention}.")
             if key=="ban":await argument.ban(reason=reason or f"Shortcut by {ctx.author}",delete_message_days=0); return await ctx.send(f"🔨 تم حظر {argument.mention}.")
             if key=="warn":return await ctx.send(f"⚠️ تحذير {argument.mention}: {reason or 'تحذير إداري.'}")
-            if key=="member_info":
-                embed=discord.Embed(title=f"معلومات العضو: {argument}",color=discord.Color.blurple()); embed.set_thumbnail(url=argument.display_avatar.url); embed.set_image(url=INFO_IMAGE); embed.add_field(name="الاسم",value=argument.mention,inline=True); embed.add_field(name="ID",value=str(argument.id),inline=True); embed.add_field(name="الحساب",value=discord.utils.format_dt(argument.created_at,"F"),inline=False); embed.add_field(name="دخل السيرفر",value=discord.utils.format_dt(argument.joined_at,"F") if argument.joined_at else "غير معروف",inline=False); return await ctx.send(embed=embed)
         except discord.Forbidden:return await ctx.send("❌ البوت ما عندوش الصلاحيات الكافية أو العضو أعلى من البوت.",delete_after=7)
         except discord.HTTPException as exc:return await ctx.send(f"❌ تعذر تنفيذ العملية: `{exc}`",delete_after=7)
     @commands.Cog.listener()
