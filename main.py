@@ -3,12 +3,16 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+from datetime import timedelta
 import discord
 from discord.ext import commands
 import yaml
 from dotenv import load_dotenv
 from database.db_manager import DatabaseManager
 from utils.logger import BotLogger
+
+# Compatibility for the existing moderation cog: discord.py does not expose timedelta.
+discord.timedelta = timedelta
 
 load_dotenv()
 
@@ -22,8 +26,9 @@ class Ader(commands.Bot):
         await self.db.connect(); await self.load_cogs()
     async def load_cogs(self):
         directory=Path(__file__).parent/'cogs'; loaded=0
+        disabled={'application_system.py','application_system_v2.py'}
         for path in sorted(directory.glob('*.py')):
-            if path.stem.startswith('_') or path.stem=='__init__': continue
+            if path.stem.startswith('_') or path.stem=='__init__' or path.name in disabled: continue
             try: await self.load_extension(f'cogs.{path.stem}'); loaded+=1
             except Exception as exc: self.logger.error(f'Failed to load cog {path.stem}: {exc}',exc_info=True)
         self.logger.info(f'Loaded {loaded} cogs')
