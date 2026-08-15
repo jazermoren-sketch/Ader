@@ -1,6 +1,5 @@
 """Advanced customizable tickets and ANOCoin owner grants."""
 from __future__ import annotations
-import json
 import re
 import time
 from typing import Optional
@@ -150,9 +149,8 @@ class AddOptionModal(discord.ui.Modal, title="إضافة نوع تذكرة"):
             return await interaction.response.send_message("❌ Panel ما لقيتوش.", ephemeral=True)
         if len(panel.get("options", [])) >= 25:
             return await interaction.response.send_message("❌ ما يمكنش تزيد أكثر من 25 نوع فـPanel واحد.", ephemeral=True)
-        style = 1
         options = panel.setdefault("options", [])
-        options.append({"id": f"o{int(time.time()*1000)}", "label": str(self.label.value).strip(), "emoji": str(self.emoji.value).strip(), "ticket_name": str(self.ticket_name.value).strip(), "ticket_description": str(self.ticket_description.value), "ticket_image": str(self.image.value).strip(), "style": style})
+        options.append({"id": f"o{int(time.time()*1000)}", "label": str(self.label.value).strip(), "emoji": str(self.emoji.value).strip(), "ticket_name": str(self.ticket_name.value).strip(), "ticket_description": str(self.ticket_description.value), "ticket_image": str(self.image.value).strip(), "style": 1})
         await self.cog.update_panel(interaction.guild.id, panel)
         await interaction.response.send_message(f"✅ تزاد **{self.label.value}** للـPanel.", ephemeral=True)
 
@@ -162,7 +160,9 @@ class AdvancedTickets(commands.Cog):
         self.bot = bot
 
     async def cog_load(self):
-        for name in ("ticket-panel", "balance", "daily"):
+        # Replace only the duplicated legacy ticket and balance commands.
+        # /daily remains owned by the existing economy cog.
+        for name in ("ticket-panel", "balance"):
             self.bot.tree.remove_command(name)
 
     async def guild_cfg(self, guild_id):
