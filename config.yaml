@@ -33,9 +33,9 @@ modules:
     xp_cooldown: 60
   economy:
     enabled: true
-    currency_name: "AderCoin"
-    currency_symbol: "💎"
-    starting_balance: 1000
+    currency_name: "ANOCoin"
+    currency_symbol: "🪙"
+    starting_balance: 0
     daily_reward: 100
   tickets:
     enabled: true
