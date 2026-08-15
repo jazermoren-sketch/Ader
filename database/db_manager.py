@@ -39,9 +39,14 @@ class DatabaseManager:
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL,
             xp INTEGER NOT NULL DEFAULT 0, level INTEGER NOT NULL DEFAULT 0,
-            balance INTEGER NOT NULL DEFAULT 1000, inventory TEXT NOT NULL DEFAULT '[]',
+            balance INTEGER NOT NULL DEFAULT 0, inventory TEXT NOT NULL DEFAULT '[]',
             warnings TEXT NOT NULL DEFAULT '[]', created_at REAL NOT NULL,
             PRIMARY KEY(user_id, guild_id)
+        );
+        CREATE TABLE IF NOT EXISTS global_balances (
+            user_id INTEGER PRIMARY KEY,
+            balance INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL
         );
         CREATE TABLE IF NOT EXISTS guilds (
             guild_id INTEGER PRIMARY KEY, config TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL
@@ -92,6 +97,10 @@ class DatabaseManager:
             PRIMARY KEY(guild_id, user_id, action)
         );
         """)
+        await self.connection.execute(
+            """INSERT OR IGNORE INTO global_balances(user_id, balance, created_at)
+               SELECT user_id, 0, MIN(created_at) FROM users GROUP BY user_id"""
+        )
         await self.connection.commit()
 
     async def execute(self, sql: str, params: tuple = ()):
@@ -114,20 +123,42 @@ class DatabaseManager:
         d = dict(row)
         d['inventory'] = json.loads(d['inventory'] or '[]')
         d['warnings'] = json.loads(d['warnings'] or '[]')
+        d['balance'] = await self.get_balance(user_id)
         return d
 
     async def create_user(self, user_id: int, guild_id: int, data: Dict[str, Any] = None) -> Dict[str, Any]:
         data = data or {}
         await self.execute("INSERT OR IGNORE INTO users(user_id,guild_id,xp,level,balance,inventory,warnings,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                           (user_id,guild_id,data.get('xp',0),data.get('level',0),data.get('balance',1000),json.dumps(data.get('inventory',[])),json.dumps(data.get('warnings',[])),time.time()))
+                           (user_id,guild_id,data.get('xp',0),data.get('level',0),0,json.dumps(data.get('inventory',[])),json.dumps(data.get('warnings',[])),time.time()))
+        await self.execute("INSERT OR IGNORE INTO global_balances(user_id,balance,created_at) VALUES(?,?,?)", (user_id, 0, time.time()))
         return await self.get_user(user_id, guild_id)
+
+    async def get_balance(self, user_id: int) -> int:
+        row = await self.fetchone("SELECT balance FROM global_balances WHERE user_id=?", (user_id,))
+        return int(row[0]) if row else 0
+
+    async def update_global_balance(self, user_id: int, amount: int) -> bool:
+        await self.execute("INSERT OR IGNORE INTO global_balances(user_id,balance,created_at) VALUES(?,?,?)", (user_id, 0, time.time()))
+        cur = await self.execute("UPDATE global_balances SET balance=balance+? WHERE user_id=?", (amount, user_id))
+        return cur.rowcount > 0
+
+    async def set_global_balance(self, user_id: int, amount: int) -> bool:
+        if amount < 0:
+            return False
+        await self.execute("INSERT OR IGNORE INTO global_balances(user_id,balance,created_at) VALUES(?,?,?)", (user_id, amount, time.time()))
+        cur = await self.execute("UPDATE global_balances SET balance=? WHERE user_id=?", (amount, user_id))
+        return cur.rowcount > 0
 
     async def update_user(self, user_id: int, guild_id: int, data: Dict[str, Any]) -> bool:
         if not data: return False
+        if 'balance' in data:
+            await self.set_global_balance(user_id, int(data['balance']))
+            data = {k: v for k, v in data.items() if k != 'balance'}
+        if not data: return True
         sets=[]; vals=[]
         for key,value in data.items():
             if key in ('inventory','warnings'): value=json.dumps(value)
-            if key not in {'xp','level','balance','inventory','warnings'}: continue
+            if key not in {'xp','level','inventory','warnings'}: continue
             sets.append(f"{key}=?"); vals.append(value)
         if not sets: return False
         vals += [user_id,guild_id]
@@ -135,7 +166,7 @@ class DatabaseManager:
         return cur.rowcount > 0
 
     async def increment_user_field(self, user_id: int, guild_id: int, field: str, amount: int = 1) -> bool:
-        if field not in {'xp','level','balance'}: return False
+        if field not in {'xp','level'}: return False
         await self.create_user(user_id,guild_id)
         cur = await self.execute(f"UPDATE users SET {field}={field}+? WHERE user_id=? AND guild_id=?", (amount,user_id,guild_id))
         return cur.rowcount > 0
@@ -159,12 +190,14 @@ class DatabaseManager:
         rows=await self.fetchall("SELECT * FROM users WHERE guild_id=? ORDER BY xp DESC LIMIT ?",(guild_id,limit)); return [dict(r) for r in rows]
 
     async def add_balance(self,user_id:int,guild_id:int,amount:int)->bool:
-        await self.create_user(user_id,guild_id); return await self.increment_user_field(user_id,guild_id,'balance',amount)
+        await self.create_user(user_id,guild_id)
+        return await self.update_global_balance(user_id, amount)
 
     async def remove_balance(self,user_id:int,guild_id:int,amount:int)->bool:
-        u=await self.get_user(user_id,guild_id)
-        if not u or u['balance']<amount:return False
-        return await self.increment_user_field(user_id,guild_id,'balance',-amount)
+        balance = await self.get_balance(user_id)
+        if balance < amount:
+            return False
+        return await self.update_global_balance(user_id, -amount)
 
     async def add_item(self,user_id:int,guild_id:int,item:Dict[str,Any])->bool:
         u=await self.create_user(user_id,guild_id); inv=u['inventory']; inv.append(item); return await self.update_user(user_id,guild_id,{'inventory':inv})
