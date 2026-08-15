@@ -39,11 +39,24 @@ class Ader(commands.Bot):
     async def load_cogs(self):
         directory = Path(__file__).parent / 'cogs'
         loaded = 0
-        disabled = {'application_system.py', 'application_system_v2.py'}
+        # Keep only the current application system. v4 inherits the implementation
+        # from v3, so loading both would register /تقديم twice.
+        disabled = {
+            'application_system.py',
+            'application_system_v2.py',
+            'application_system_v3.py',
+        }
         for path in sorted(directory.glob('*.py')):
             if path.stem.startswith('_') or path.stem == '__init__' or path.name in disabled:
                 continue
             try:
+                # Some older cogs expose commands that are intentionally superseded
+                # by the newer systems. Remove the old tree entry before the newer
+                # cog is injected so startup cannot fail with CommandAlreadyRegistered.
+                if path.stem == 'application_system_v4':
+                    self.tree.remove_command('تقديم')
+                elif path.stem == 'ultimate_system':
+                    self.tree.remove_command('warn')
                 await self.load_extension(f'cogs.{path.stem}')
                 loaded += 1
             except Exception as exc:
