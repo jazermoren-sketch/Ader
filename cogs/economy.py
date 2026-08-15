@@ -1,221 +1,116 @@
-"""
-Economy Cog for Logiq
-Virtual currency system with shop and gambling
-"""
+"""Global ANOCoin economy commands."""
+
+import logging
+from datetime import datetime
+import random
 
 import discord
 from discord import app_commands
 from discord.ext import commands
-from datetime import datetime
-import logging
-import random
 
 from utils.embeds import EmbedFactory, EmbedColor
-from utils.permissions import is_admin
-from database.db_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
+OWNER_ID = 1472570059367911587
 
 
 class Economy(commands.Cog):
-    """Economy system cog"""
-
-    def __init__(self, bot: commands.Bot, db: DatabaseManager, config: dict):
+    def __init__(self, bot: commands.Bot, db, config: dict):
         self.bot = bot
         self.db = db
         self.config = config
-        self.module_config = config.get('modules', {}).get('economy', {})
-        self.currency_symbol = self.module_config.get('currency_symbol', '💎')
-        self.currency_name = self.module_config.get('currency_name', 'ProgrammiCoin')
+        self.module_config = config.get("modules", {}).get("economy", {})
+        self.currency_symbol = self.module_config.get("currency_symbol", "🪙")
+        self.currency_name = self.module_config.get("currency_name", "ANOCoin")
 
-    # /balance is provided publicly by games.py.
-
-    @app_commands.command(name="daily", description="Claim your daily reward")
-    async def daily(self, interaction: discord.Interaction):
-        """Claim daily reward - PUBLIC."""
-        user_data = await self.db.get_user(interaction.user.id, interaction.guild.id)
-        if not user_data:
-            user_data = await self.db.create_user(interaction.user.id, interaction.guild.id)
-
-        last_daily = user_data.get('last_daily', 0)
-        current_time = datetime.utcnow().timestamp()
-        cooldown = self.module_config.get('daily_cooldown', 86400)
-
-        if current_time - last_daily < cooldown:
-            time_left = cooldown - (current_time - last_daily)
-            hours = int(time_left // 3600)
-            minutes = int((time_left % 3600) // 60)
-            await interaction.response.send_message(
-                embed=EmbedFactory.warning(
-                    "Cooldown Active",
-                    f"You can claim your daily reward in **{hours}h {minutes}m**"
-                ),
-                ephemeral=True
+    @app_commands.command(name="credits", description="Show your ANOCoin balance or transfer ANOCoin")
+    @app_commands.describe(user="User to receive ANOCoin", amount="Amount to transfer")
+    async def credits(self, interaction: discord.Interaction, user: discord.Member | None = None, amount: int | None = None):
+        if user is None and amount is None:
+            balance = await self.db.get_balance(interaction.user.id)
+            return await interaction.response.send_message(
+                embed=EmbedFactory.create(
+                    title=f"{self.currency_symbol} رصيدك من {self.currency_name}",
+                    description=f"عندك حالياً **{balance:,} {self.currency_name}**.",
+                    color=EmbedColor.ECONOMY,
+                ), ephemeral=True
             )
-            return
-
-        daily_amount = self.module_config.get('daily_reward', 100)
-        await self.db.add_balance(interaction.user.id, interaction.guild.id, daily_amount)
-        await self.db.update_user(
-            interaction.user.id,
-            interaction.guild.id,
-            {'last_daily': current_time}
-        )
-
-        new_balance = user_data.get('balance', 0) + daily_amount
-        embed = EmbedFactory.success(
-            "Daily Reward Claimed!",
-            f"You received **{self.currency_symbol} {daily_amount:,}**!\n\n"
-            f"New balance: **{self.currency_symbol} {new_balance:,}**"
-        )
-        await interaction.response.send_message(embed=embed)
-        logger.info(f"{interaction.user} claimed daily reward in {interaction.guild}")
-
-    @app_commands.command(name="give", description="Give currency from your balance to another user")
-    @app_commands.describe(user="User to give to", amount="Amount to give")
-    async def give(self, interaction: discord.Interaction, user: discord.Member, amount: int):
-        """Transfer currency from the caller's own balance - PUBLIC."""
-        if amount <= 0:
-            await interaction.response.send_message(
-                embed=EmbedFactory.error("Invalid Amount", "Amount must be positive"),
-                ephemeral=True
+        if user is None or amount is None:
+            return await interaction.response.send_message(
+                embed=EmbedFactory.error("استعمال غير صحيح", "حدد user و amount معاً، أو استعمل `/credits` بلا خيارات لمعرفة رصيدك."), ephemeral=True
             )
-            return
-        if user.id == interaction.user.id:
-            await interaction.response.send_message(
-                embed=EmbedFactory.error("Invalid Target", "You can't give currency to yourself"),
-                ephemeral=True
-            )
-            return
-        if user.bot:
-            await interaction.response.send_message(
-                embed=EmbedFactory.error("Invalid Target", "You can't give currency to bots"),
-                ephemeral=True
-            )
-            return
-
-        sender_data = await self.db.get_user(interaction.user.id, interaction.guild.id)
-        if not sender_data:
-            sender_data = await self.db.create_user(interaction.user.id, interaction.guild.id)
-
-        if sender_data.get('balance', 0) < amount:
-            await interaction.response.send_message(
-                embed=EmbedFactory.error("Insufficient Funds", "You don't have enough currency"),
-                ephemeral=True
-            )
-            return
-
+        if amount <= 0 or user.bot or user.id == interaction.user.id:
+            return await interaction.response.send_message(embed=EmbedFactory.error("مبلغ غير صالح", "حدد مبلغاً موجباً وعضواً آخر غير البوتات."), ephemeral=True)
+        balance = await self.db.get_balance(interaction.user.id)
+        if balance < amount:
+            return await interaction.response.send_message(embed=EmbedFactory.error("رصيد غير كافٍ", f"رصيدك هو **{balance:,} {self.currency_name}** فقط."), ephemeral=True)
         await self.db.remove_balance(interaction.user.id, interaction.guild.id, amount)
         await self.db.add_balance(user.id, interaction.guild.id, amount)
+        await interaction.response.send_message(embed=EmbedFactory.success("تم التحويل", f"تم تحويل **{amount:,} {self.currency_name}** من {interaction.user.mention} إلى {user.mention}."))
 
-        embed = EmbedFactory.success(
-            "Transfer Complete",
-            f"{interaction.user.mention} gave **{self.currency_symbol} {amount:,}** to {user.mention}"
-        )
-        await interaction.response.send_message(embed=embed)
-        logger.info(f"{interaction.user} gave {amount} to {user}")
+    @app_commands.command(name="daily", description="Claim your daily ANOCoin reward")
+    async def daily(self, interaction: discord.Interaction):
+        user_data = await self.db.get_user(interaction.user.id, interaction.guild.id) or await self.db.create_user(interaction.user.id, interaction.guild.id)
+        last_daily = user_data.get("last_daily", 0)
+        now = datetime.utcnow().timestamp()
+        cooldown = self.module_config.get("daily_cooldown", 86400)
+        if now - last_daily < cooldown:
+            left = cooldown - (now - last_daily)
+            return await interaction.response.send_message(embed=EmbedFactory.warning("Cooldown", f"باقي **{int(left // 3600)}h {int((left % 3600) // 60)}m**."), ephemeral=True)
+        amount = self.module_config.get("daily_reward", 100)
+        await self.db.add_balance(interaction.user.id, interaction.guild.id, amount)
+        await self.db.update_user(interaction.user.id, interaction.guild.id, {"last_daily": now})
+        balance = await self.db.get_balance(interaction.user.id)
+        await interaction.response.send_message(embed=EmbedFactory.success("🎁 Daily", f"ربحتي **{amount:,} {self.currency_name}**.\nرصيدك: **{balance:,} {self.currency_name}**"))
 
-    @app_commands.command(name="coinflip-bet", description="Flip a coin and bet currency")
-    @app_commands.describe(amount="Amount to bet", choice="Heads or Tails")
+    @app_commands.command(name="give", description="Give ANOCoin from your own balance")
+    @app_commands.describe(user="User to give to", amount="Amount to give")
+    async def give(self, interaction: discord.Interaction, user: discord.Member, amount: int):
+        if amount <= 0 or user.bot or user.id == interaction.user.id:
+            return await interaction.response.send_message(embed=EmbedFactory.error("مبلغ غير صالح", "حدد مبلغاً موجباً وعضواً آخر."), ephemeral=True)
+        balance = await self.db.get_balance(interaction.user.id)
+        if balance < amount:
+            return await interaction.response.send_message(embed=EmbedFactory.error("رصيد غير كافٍ", f"عندك فقط **{balance:,} {self.currency_name}**."), ephemeral=True)
+        await self.db.remove_balance(interaction.user.id, interaction.guild.id, amount)
+        await self.db.add_balance(user.id, interaction.guild.id, amount)
+        await interaction.response.send_message(embed=EmbedFactory.success("تم التحويل", f"تم إرسال **{amount:,} {self.currency_name}** إلى {user.mention}."))
+
+    @app_commands.command(name="coinflip-bet", description="Bet ANOCoin on a coin flip")
+    @app_commands.describe(amount="Amount to bet", choice="heads or tails")
     async def coinflip(self, interaction: discord.Interaction, amount: int, choice: str):
-        """Coinflip gambling - PUBLIC."""
-        if amount <= 0:
-            await interaction.response.send_message(
-                embed=EmbedFactory.error("Invalid Amount", "Amount must be positive"),
-                ephemeral=True
-            )
-            return
-
-        choice = choice.lower()
-        if choice not in ['heads', 'tails', 'h', 't']:
-            await interaction.response.send_message(
-                embed=EmbedFactory.error("Invalid Choice", "Choose 'heads' or 'tails'"),
-                ephemeral=True
-            )
-            return
-        choice = 'heads' if choice in ['heads', 'h'] else 'tails'
-
-        user_data = await self.db.get_user(interaction.user.id, interaction.guild.id)
-        if not user_data:
-            user_data = await self.db.create_user(interaction.user.id, interaction.guild.id)
-        if user_data.get('balance', 0) < amount:
-            await interaction.response.send_message(
-                embed=EmbedFactory.error("Insufficient Funds", "You don't have enough currency"),
-                ephemeral=True
-            )
-            return
-
-        result = random.choice(['heads', 'tails'])
-        won = result == choice
+        if amount <= 0 or choice.lower() not in {"heads", "tails", "h", "t"}:
+            return await interaction.response.send_message(embed=EmbedFactory.error("Invalid bet", "حدد مبلغاً موجباً واختياراً صحيحاً."), ephemeral=True)
+        balance = await self.db.get_balance(interaction.user.id)
+        if balance < amount:
+            return await interaction.response.send_message(embed=EmbedFactory.error("رصيد غير كافٍ", "ما عندكش رصيد كافي."), ephemeral=True)
+        choice = "heads" if choice.lower() in {"heads", "h"} else "tails"
+        won = random.choice(["heads", "tails"]) == choice
         if won:
             await self.db.add_balance(interaction.user.id, interaction.guild.id, amount)
-            new_balance = user_data.get('balance', 0) + amount
-            embed = EmbedFactory.success(
-                "🎉 You Won!",
-                f"The coin landed on **{result}**!\n\n"
-                f"You won **{self.currency_symbol} {amount:,}**!\n"
-                f"New balance: **{self.currency_symbol} {new_balance:,}**"
-            )
         else:
             await self.db.remove_balance(interaction.user.id, interaction.guild.id, amount)
-            new_balance = user_data.get('balance', 0) - amount
-            embed = EmbedFactory.error(
-                "You Lost!",
-                f"The coin landed on **{result}**!\n\n"
-                f"You lost **{self.currency_symbol} {amount:,}**!\n"
-                f"New balance: **{self.currency_symbol} {new_balance:,}**"
-            )
+        new_balance = await self.db.get_balance(interaction.user.id)
+        text = f"🎉 ربحت **{amount:,} {self.currency_name}**" if won else f"❌ خسرت **{amount:,} {self.currency_name}**"
+        embed = EmbedFactory.success("Coinflip", f"{text}\nرصيدك: **{new_balance:,} {self.currency_name}**") if won else EmbedFactory.error("Coinflip", f"{text}\nرصيدك: **{new_balance:,} {self.currency_name}**")
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="shop", description="View the server shop")
     async def shop(self, interaction: discord.Interaction):
-        """View shop - PUBLIC."""
         items = await self.db.get_shop_items(interaction.guild.id)
         if not items:
-            await interaction.response.send_message(
-                embed=EmbedFactory.info("Empty Shop", "The shop is currently empty"),
-                ephemeral=True
-            )
+            return await interaction.response.send_message(embed=EmbedFactory.info("Empty Shop", "المتجر فارغ حالياً."), ephemeral=True)
+        description = "\n\n".join(f"**{x['name']}** — {self.currency_symbol} {x['price']:,}\n{x['description']}" for x in items[:25])
+        await interaction.response.send_message(embed=EmbedFactory.create(title="🏪 ANOCoin Shop", description=description, color=EmbedColor.ECONOMY))
+
+    @commands.command(name="اعطي")
+    async def owner_give_prefix(self, ctx: commands.Context, member: discord.Member | None = None, amount: int | None = None):
+        if ctx.author.id != OWNER_ID:
             return
-
-        description = ""
-        for item in items[:25]:
-            description += f"**{item['name']}** - {self.currency_symbol} {item['price']:,}\n"
-            description += f"  *{item['description']}*\n\n"
-
-        embed = EmbedFactory.create(
-            title="🏪 Server Shop",
-            description=description,
-            color=EmbedColor.ECONOMY
-        )
-        await interaction.response.send_message(embed=embed)
-
-    @app_commands.command(name="addbalance", description="Add balance to a user (Admin)")
-    @app_commands.describe(user="User to add balance to", amount="Amount to add")
-    @is_admin()
-    async def add_balance_admin(
-        self,
-        interaction: discord.Interaction,
-        user: discord.Member,
-        amount: int
-    ):
-        """Add balance to user - ADMIN ONLY."""
-        if amount <= 0:
-            await interaction.response.send_message(
-                embed=EmbedFactory.error("Invalid Amount", "Amount must be positive"),
-                ephemeral=True
-            )
-            return
-
-        await self.db.add_balance(user.id, interaction.guild.id, amount)
-        embed = EmbedFactory.success(
-            "Balance Added",
-            f"Added **{self.currency_symbol} {amount:,}** to {user.mention}"
-        )
-        await interaction.response.send_message(embed=embed)
-        logger.info(f"{interaction.user} added {amount} to {user}")
+        if member is None or amount is None or amount <= 0 or member.bot:
+            return await ctx.send("❌ الاستعمال: `!اعطي @user المبلغ`", delete_after=6)
+        await self.db.add_balance(member.id, ctx.guild.id, amount)
+        await ctx.send(f"🪙 تم إعطاء {member.mention} **{amount:,} {self.currency_name}**.")
 
 
 async def setup(bot: commands.Bot):
-    """Setup function for cog loading"""
     await bot.add_cog(Economy(bot, bot.db, bot.config))
