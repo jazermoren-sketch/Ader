@@ -16,6 +16,7 @@ load_dotenv()
 # Compatibility for legacy cogs that referenced discord.timedelta.
 discord.timedelta = timedelta
 
+
 class Ader(commands.Bot):
     def __init__(self, config: dict):
         intents = discord.Intents.default()
@@ -39,24 +40,24 @@ class Ader(commands.Bot):
     async def load_cogs(self):
         directory = Path(__file__).parent / 'cogs'
         loaded = 0
-        # Keep only the current application system. v4 inherits the implementation
-        # from v3, so loading both would register /تقديم twice.
         disabled = {
             'application_system.py',
             'application_system_v2.py',
             'application_system_v3.py',
         }
+
         for path in sorted(directory.glob('*.py')):
             if path.stem.startswith('_') or path.stem == '__init__' or path.name in disabled:
                 continue
             try:
-                # Some older cogs expose commands that are intentionally superseded
-                # by the newer systems. Remove the old tree entry before the newer
-                # cog is injected so startup cannot fail with CommandAlreadyRegistered.
+                # The newer cogs own these commands. Removing a stale command from
+                # another legacy cog prevents CommandAlreadyRegistered during startup.
                 if path.stem == 'application_system_v4':
                     self.tree.remove_command('تقديم')
                 elif path.stem == 'ultimate_system':
                     self.tree.remove_command('warn')
+                    self.tree.remove_command('warnings')
+
                 await self.load_extension(f'cogs.{path.stem}')
                 loaded += 1
             except Exception as exc:
@@ -71,8 +72,13 @@ class Ader(commands.Bot):
             'streaming': discord.ActivityType.streaming,
         }
         typ = self.config.get('bot', {}).get('activity_type', 'watching')
-        text = self.config.get('bot', {}).get('activity', 'your community')
-        await self.change_presence(activity=discord.Activity(type=types.get(typ, discord.ActivityType.watching), name=text))
+        text = self.config.get('bot', {}).get('activity', 'مجتمعك')
+        await self.change_presence(
+            activity=discord.Activity(
+                type=types.get(typ, discord.ActivityType.watching),
+                name=text,
+            )
+        )
         try:
             synced = await self.tree.sync()
             self.logger.info(f'Synced {len(synced)} application commands')
@@ -84,10 +90,10 @@ class Ader(commands.Bot):
         if isinstance(error, commands.CommandNotFound):
             return
         if isinstance(error, commands.MissingPermissions):
-            await ctx.send('❌ You do not have permission to use this command.', delete_after=6)
+            await ctx.send('❌ ليس لديك الصلاحية لاستخدام هذا الأمر.', delete_after=6)
             return
         if isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send(f'❌ Missing argument: `{error.param.name}`', delete_after=6)
+            await ctx.send(f'❌ المعطى المطلوب ناقص: `{error.param.name}`', delete_after=6)
             return
         self.logger.error(f'Command error: {error}', exc_info=True)
 
