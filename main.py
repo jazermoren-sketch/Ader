@@ -2,6 +2,7 @@
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 from datetime import timedelta
 
@@ -17,9 +18,6 @@ from utils.logger import BotLogger
 load_dotenv()
 discord.timedelta = timedelta
 
-# Prefix shortcuts should answer as replies to the triggering message without
-# pinging its author. Use the original Context.send implementation with a
-# message reference rather than Context.reply, avoiding recursive monkey-patching.
 _original_context_send = commands.Context.send
 
 
@@ -33,20 +31,6 @@ async def _context_send(self, *args, **kwargs):
 
 
 commands.Context.send = _context_send
-
-LEGACY_TICKET_COMMANDS = {
-    "ticket-option-add",
-    "ticket-option-remove",
-    "ticket-panel",
-    "ticket-panels",
-    "ticket-setup",
-    "ticket-setup-panel",
-    "ticket-publish",
-    "ticket-option",
-    "close-ticket",
-    "delete-ticket",
-    "tickets",
-}
 
 
 class Ader(commands.Bot):
@@ -63,9 +47,7 @@ class Ader(commands.Bot):
         self.config = config
         self.start_time = discord.utils.utcnow()
         self.logger = BotLogger(config.get("logging", {}))
-        self.db = DatabaseManager(
-            config.get("database", {}).get("sqlite_path", "data/ader.sqlite3")
-        )
+        self.db = DatabaseManager(config.get("database", {}).get("sqlite_path", "data/ader.sqlite3"))
 
     async def setup_hook(self):
         await self.db.connect()
@@ -90,19 +72,54 @@ class Ader(commands.Bot):
                 elif path.stem == "ultimate_system":
                     for command_name in ("warn", "warnings", "ban"):
                         self.tree.remove_command(command_name)
-
                 await self.load_extension(f"cogs.{path.stem}")
                 loaded += 1
             except Exception as exc:
-                self.logger.error(
-                    f"Failed to load cog {path.stem}: {exc}",
-                    exc_info=True,
-                )
+                self.logger.error(f"Failed to load cog {path.stem}: {exc}", exc_info=True)
 
-        for command_name in LEGACY_TICKET_COMMANDS:
-            self.tree.remove_command(command_name)
-
+        self._remove_all_legacy_ticket_commands()
+        self._replace_owner_give_command()
         self.logger.info(f"Loaded {loaded} cogs")
+
+    def _remove_all_legacy_ticket_commands(self):
+        """Keep exactly /ticket; remove every other ticket-named application command."""
+        for command in list(self.tree.get_commands()):
+            name = str(command.name).lower()
+            if name != "ticket" and ("ticket" in name or name in {"tickets", "close-ticket", "delete-ticket"}):
+                self.tree.remove_command(command.name)
+
+    def _replace_owner_give_command(self):
+        """Register exactly one idempotent owner-only !اعطي command."""
+        while self.get_command("اعطي") is not None:
+            self.remove_command("اعطي")
+
+        @self.command(name="اعطي", help="Owner-only ANOCoin grant")
+        async def owner_give(ctx: commands.Context, member: discord.Member | None = None, amount: int | None = None):
+            owner_id = 1472570059367911587
+            if ctx.author.id != owner_id:
+                return
+            if member is None or amount is None or amount <= 0 or member.bot or ctx.guild is None:
+                return await ctx.send("❌ الاستعمال: `!اعطي @user المبلغ`", delete_after=6)
+
+            # The message ID is the idempotency key. This prevents the same Discord
+            # message from crediting the recipient twice, even if the handler is
+            # accidentally invoked more than once against the same SQLite DB.
+            key = f"owner-give:{ctx.message.id}"
+            cur = await self.db.execute(
+                "INSERT OR IGNORE INTO processed_commands(command_key, created_at) VALUES(?, ?)",
+                (key, time.time()),
+            )
+            if cur.rowcount != 1:
+                return await ctx.send("⚠️ هاد الأمر راه تعالج من قبل.", delete_after=6)
+
+            ok = await self.db.add_balance(member.id, ctx.guild.id, amount)
+            if not ok:
+                return await ctx.send("❌ تعذر إضافة العملة. عاود المحاولة.", delete_after=6)
+            new_balance = await self.db.get_balance(member.id)
+            await ctx.send(
+                f"🪙 تم إعطاء {member.mention} **{amount:,} ANOCoin**. "
+                f"الرصيد الجديد: **{new_balance:,} ANOCoin**."
+            )
 
     async def on_ready(self):
         types = {
@@ -113,139 +130,41 @@ class Ader(commands.Bot):
         }
         typ = self.config.get("bot", {}).get("activity_type", "watching")
         text = self.config.get("bot", {}).get("activity", "مجتمعك")
-
-        await self.change_presence(
-            activity=discord.Activity(
-                type=types.get(typ, discord.ActivityType.watching),
-                name=text,
-            )
-        )
+        await self.change_presence(activity=discord.Activity(type=types.get(typ, discord.ActivityType.watching), name=text))
 
         try:
             synced = await self.tree.sync()
             self.logger.info(f"Synced {len(synced)} global application commands")
-
             for guild in self.guilds:
                 try:
                     self.tree.clear_commands(guild=guild)
                     await self.tree.sync(guild=guild)
                     self.logger.info(f"Cleared legacy guild-scoped commands in {guild.id}")
-                except discord.HTTPException as exc:
-                    self.logger.error(
-                        f"Failed to clear guild-scoped commands in {guild.id}: {exc}"
-                    )
+                except Exception as exc:
+                    self.logger.error(f"Guild command cleanup failed for {guild.id}: {exc}")
+            self.logger.info(f"Ader ready as {self.user} in {len(self.guilds)} guilds")
         except Exception as exc:
             self.logger.error(f"Command sync failed: {exc}", exc_info=True)
 
-        self.logger.info(f"Ader ready as {self.user} in {len(self.guilds)} guilds")
-
-    async def on_app_command_error(
-        self,
-        interaction: discord.Interaction,
-        error: app_commands.AppCommandError,
-    ):
-        original = getattr(error, "original", error)
-
-        if isinstance(original, app_commands.MissingPermissions):
-            message = "❌ ما عندكش الصلاحيات المطلوبة لاستعمال هاد الأمر."
-        elif isinstance(original, app_commands.CheckFailure):
-            message = "❌ ما عندكش الصلاحية أو الشروط المطلوبة لاستعمال هاد الأمر."
-        elif isinstance(original, discord.Forbidden):
-            message = "❌ البوت ما عندوش الصلاحيات أو Access الكافي لتنفيذ هاد الأمر."
-        elif isinstance(original, discord.HTTPException) and getattr(original, "code", None) == 350005:
-            message = (
-                "❌ Discord رفض العملية بسبب Server Onboarding. "
-                "خاص يبقى على الأقل روم واحد @everyone يقدر يقرا فيه ويرسل الرسائل."
-            )
-        else:
-            message = "❌ وقع خطأ أثناء تنفيذ الأمر. حاول مرة أخرى."
-
-        try:
-            if interaction.response.is_done():
-                await interaction.followup.send(message, ephemeral=True)
-            else:
-                await interaction.response.send_message(message, ephemeral=True)
-        except Exception as exc:
-            self.logger.error(
-                f"Could not acknowledge application command error: {exc}",
-                exc_info=True,
-            )
-
-        self.logger.error(f"Application command error: {original}", exc_info=True)
-
-    async def on_command_error(self, ctx, error):
-        if isinstance(error, commands.CommandNotFound):
-            return
-
-        try:
-            if isinstance(error, commands.MissingPermissions):
-                await ctx.send(
-                    "❌ ليس لديك الصلاحية لاستخدام هذا الأمر.",
-                    delete_after=6,
-                )
-                return
-            if isinstance(error, commands.MissingRequiredArgument):
-                await ctx.send(
-                    f"❌ المعطى المطلوب ناقص: `{error.param.name}`",
-                    delete_after=6,
-                )
-                return
-            if isinstance(error, commands.BotMissingPermissions):
-                await ctx.send(
-                    "❌ البوت ما عندوش الصلاحيات المطلوبة.",
-                    delete_after=6,
-                )
-                return
-            if isinstance(error, commands.CheckFailure):
-                await ctx.send(
-                    "❌ ما عندكش الشروط المطلوبة لاستعمال هاد الأمر.",
-                    delete_after=6,
-                )
-                return
-        except discord.HTTPException:
-            pass
-
-        self.logger.error(f"Command error: {error}", exc_info=True)
-
-    async def on_error(self, event, *args, **kwargs):
-        self.logger.error(f"Event error: {event}", exc_info=True)
-
     async def close(self):
-        await self.db.disconnect()
-        await super().close()
+        try:
+            await self.db.disconnect()
+        finally:
+            await super().close()
 
 
-def load_config(path="config.yaml"):
-    try:
-        with open(path, encoding="utf-8") as f:
-            config = yaml.safe_load(f) or {}
-    except (OSError, yaml.YAMLError) as exc:
-        print(f"Config error: {exc}")
-        sys.exit(1)
-
-    def replace(v):
-        if isinstance(v, dict):
-            return {k: replace(x) for k, x in v.items()}
-        if isinstance(v, list):
-            return [replace(x) for x in v]
-        if isinstance(v, str) and v.startswith("${") and v.endswith("}"):
-            return os.getenv(v[2:-1], v)
-        return v
-
-    return replace(config)
+def load_config():
+    with open("config.yaml", "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
 
 async def main():
     config = load_config()
-    token = os.getenv("DISCORD_BOT_TOKEN") or config.get("bot", {}).get("token")
-
-    if not token or token.startswith("${"):
-        print("Error: DISCORD_BOT_TOKEN is not configured")
-        sys.exit(1)
-
+    token = os.getenv("DISCORD_TOKEN") or config.get("bot", {}).get("token")
+    if not token:
+        raise RuntimeError("DISCORD_TOKEN is not configured")
     bot = Ader(config)
-    async with bot:
-        await bot.start(token)
+    await bot.start(token)
 
 
 if __name__ == "__main__":
