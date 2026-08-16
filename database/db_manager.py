@@ -56,6 +56,23 @@ class DatabaseManager:
             channel_id INTEGER, user_id INTEGER, status TEXT NOT NULL DEFAULT 'open',
             claimed_by INTEGER, created_at REAL NOT NULL, closed_at REAL, data TEXT NOT NULL DEFAULT '{}'
         );
+        CREATE TABLE IF NOT EXISTS ticket_panels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            channel_id INTEGER,
+            message_id INTEGER,
+            title TEXT NOT NULL DEFAULT '🎫 الدعم الفني',
+            description TEXT NOT NULL DEFAULT 'اختار القسم المناسب لفتح تذكرة.',
+            image_url TEXT,
+            mode TEXT NOT NULL DEFAULT 'buttons',
+            button_label TEXT NOT NULL DEFAULT 'فتح تذكرة',
+            button_emoji TEXT NOT NULL DEFAULT '🎫',
+            category_id INTEGER,
+            support_role_id INTEGER,
+            ticket_description TEXT NOT NULL DEFAULT 'شرح لينا المشكل ديالك بالتفصيل.',
+            options TEXT NOT NULL DEFAULT '[]',
+            created_at REAL NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS analytics (
             id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER, type TEXT NOT NULL,
             timestamp REAL NOT NULL, data TEXT NOT NULL DEFAULT '{}'
@@ -222,6 +239,58 @@ class DatabaseManager:
             if k in {'status','claimed_by','channel_id','user_id','closed_at'}:sets.append(f'{k}=?');vals.append(v)
         if not sets:return False
         vals.append(int(ticket_id)); cur=await self.execute(f"UPDATE tickets SET {','.join(sets)} WHERE id=?",tuple(vals));return cur.rowcount>0
+
+    async def create_ticket_panel(self, data: Dict[str, Any]) -> int:
+        options = json.dumps(data.get('options', []), ensure_ascii=False)
+        cur = await self.execute(
+            """INSERT INTO ticket_panels(guild_id,channel_id,message_id,title,description,image_url,mode,button_label,button_emoji,category_id,support_role_id,ticket_description,options,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (data['guild_id'], data.get('channel_id'), data.get('message_id'), data.get('title','🎫 الدعم الفني'), data.get('description','اختار القسم المناسب لفتح تذكرة.'), data.get('image_url'), data.get('mode','buttons'), data.get('button_label','فتح تذكرة'), data.get('button_emoji','🎫'), data.get('category_id'), data.get('support_role_id'), data.get('ticket_description','شرح لينا المشكل ديالك بالتفصيل.'), options, time.time())
+        )
+        return int(cur.lastrowid)
+
+    async def get_ticket_panel(self, panel_id: int) -> Optional[Dict[str, Any]]:
+        row = await self.fetchone("SELECT * FROM ticket_panels WHERE id=?", (panel_id,))
+        if not row:
+            return None
+        data = dict(row)
+        data['options'] = json.loads(data.get('options') or '[]')
+        return data
+
+    async def list_ticket_panels(self, guild_id: int) -> List[Dict[str, Any]]:
+        rows = await self.fetchall("SELECT * FROM ticket_panels WHERE guild_id=? ORDER BY id DESC", (guild_id,))
+        result = []
+        for row in rows:
+            data = dict(row)
+            data['options'] = json.loads(data.get('options') or '[]')
+            result.append(data)
+        return result
+
+    async def update_ticket_panel(self, panel_id: int, data: Dict[str, Any]) -> bool:
+        allowed = {'channel_id','message_id','title','description','image_url','mode','button_label','button_emoji','category_id','support_role_id','ticket_description','options'}
+        sets=[]; vals=[]
+        for key, value in data.items():
+            if key not in allowed:
+                continue
+            if key == 'options':
+                value = json.dumps(value, ensure_ascii=False)
+            sets.append(f"{key}=?"); vals.append(value)
+        if not sets:
+            return False
+        vals.append(panel_id)
+        cur = await self.execute(f"UPDATE ticket_panels SET {', '.join(sets)} WHERE id=?", tuple(vals))
+        return cur.rowcount > 0
+
+    async def delete_ticket_panel(self, panel_id: int) -> bool:
+        cur = await self.execute("DELETE FROM ticket_panels WHERE id=?", (panel_id,))
+        return cur.rowcount > 0
+
+    async def get_all_ticket_panels(self) -> List[Dict[str, Any]]:
+        rows = await self.fetchall("SELECT * FROM ticket_panels ORDER BY id")
+        result=[]
+        for row in rows:
+            data=dict(row); data['options']=json.loads(data.get('options') or '[]'); result.append(data)
+        return result
 
     async def log_event(self,event_type:str,data:Dict[str,Any])->None:
         await self.execute("INSERT INTO analytics(guild_id,type,timestamp,data) VALUES(?,?,?,?)",(data.get('guild_id'),event_type,time.time(),json.dumps(data)))
