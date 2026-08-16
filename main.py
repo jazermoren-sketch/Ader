@@ -17,6 +17,22 @@ from utils.logger import BotLogger
 load_dotenv()
 discord.timedelta = timedelta
 
+# Prefix shortcuts should answer as replies to the triggering message without
+# pinging its author. This also covers configurable shortcuts from cogs/shortcuts.py
+# without making each shortcut implementation duplicate reply logic.
+_original_context_send = commands.Context.send
+
+
+async def _context_send(self, *args, **kwargs):
+    content = getattr(getattr(self, "message", None), "content", "") or ""
+    if content.strip().startswith("!") and hasattr(self, "reply"):
+        kwargs.setdefault("mention_author", False)
+        return await self.reply(*args, **kwargs)
+    return await _original_context_send(self, *args, **kwargs)
+
+
+commands.Context.send = _context_send
+
 LEGACY_TICKET_COMMANDS = {
     "ticket-option-add",
     "ticket-option-remove",
@@ -82,8 +98,6 @@ class Ader(commands.Bot):
                     exc_info=True,
                 )
 
-        # These commands belonged to older Ticket implementations. Remove any
-        # local definitions that may still be present before the next global sync.
         for command_name in LEGACY_TICKET_COMMANDS:
             self.tree.remove_command(command_name)
 
@@ -106,12 +120,10 @@ class Ader(commands.Bot):
             )
         )
 
-        # Keep Ader's application commands GLOBAL only.
         try:
             synced = await self.tree.sync()
             self.logger.info(f"Synced {len(synced)} global application commands")
 
-            # Remove old guild-scoped copies created by previous deployments.
             for guild in self.guilds:
                 try:
                     self.tree.clear_commands(guild=guild)
