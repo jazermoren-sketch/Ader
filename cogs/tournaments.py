@@ -1,9 +1,7 @@
 """Secure single-elimination tournaments with a sequential Champion quest chain."""
 from __future__ import annotations
 
-import random
 import time
-from typing import Optional
 
 import discord
 from discord import app_commands
@@ -109,9 +107,7 @@ class TournamentCog(commands.Cog):
                 value = "مكتملة"
             elif number == stage:
                 mark = "🔸"
-                if number == 1:
-                    value = f"{min(progress['wins'], target)}/{target}"
-                elif number == 2:
+                if number in (1, 2):
                     value = f"{min(progress['wins'], target)}/{target}"
                 elif number == 3:
                     value = f"{min(progress['tournaments_played'], target)}/{target}"
@@ -216,14 +212,15 @@ class TournamentCog(commands.Cog):
         if len(players) != t["max_players"]:
             return await interaction.response.send_message(f"❌ خاص العدد يكون كامل: **{t['max_players']}** لاعب.", ephemeral=True)
         ids = [int(x[0]) for x in players]
-        random.Random(tournament_id ^ interaction.guild.id).shuffle(ids)
+        # Keep the exact registration order. No shuffle: Match #1 is players 1+2,
+        # Match #2 is players 3+4, etc. This makes match membership deterministic.
         total_rounds = int(__import__('math').log2(len(ids)))
         for index in range(0, len(ids), 2):
             await self.db.execute("INSERT INTO tournament_matches(tournament_id,round_no,match_no,player1_id,player2_id,status,created_at) VALUES(?,?,?,?,?,'pending',?)", (tournament_id, 1, index // 2 + 1, ids[index], ids[index+1], time.time()))
-        await self.db.execute("UPDATE tournaments SET status='running',started_at=? WHERE id=?", (time.time(), tournament_id))
+        await self.db.execute("UPDATE tournaments SET status='running',started_at=? WHERE id=? AND status='open'", (time.time(), tournament_id))
         for uid in ids:
             await self._progress(uid, tournament=True)
-        await interaction.response.send_message(embed=EmbedFactory.success("🏆 البطولة بدات", f"**{t['name']}**\nRound 1 جاهز.\nعدد الجولات: **{total_rounds}**\nاستعمل `/tournament-report {tournament_id} <match_id> <winner>` لتسجيل نتيجة كل Match."))
+        await interaction.response.send_message(embed=EmbedFactory.success("🏆 البطولة بدات", f"**{t['name']}**\nRound 1 جاهز بالترتيب ديال التسجيل.\nعدد الجولات: **{total_rounds}**\nاستعمل `/tournament-report {tournament_id} <match_id> <winner>` لتسجيل نتيجة كل Match."))
 
     @app_commands.command(name="tournament-report", description="Report an official match result (creator/admin)")
     @app_commands.describe(tournament_id="Tournament ID", match_id="Match ID", winner="Winner of this match")
@@ -234,20 +231,26 @@ class TournamentCog(commands.Cog):
         match = await self.db.fetchone("SELECT * FROM tournament_matches WHERE id=? AND tournament_id=?", (match_id, tournament_id))
         if not match or match["status"] != "pending":
             return await interaction.response.send_message("❌ الـMatch غير موجود أو تسجلت نتيجتو من قبل.", ephemeral=True)
+        participant = await self.db.fetchone("SELECT 1 FROM tournament_participants WHERE tournament_id=? AND user_id=?", (tournament_id, winner.id))
+        if not participant:
+            return await interaction.response.send_message("❌ الفائز ماشي مسجل فهاد البطولة.", ephemeral=True)
         if winner.id not in {match["player1_id"], match["player2_id"]}:
             return await interaction.response.send_message("❌ الفائز خاصو يكون واحد من لاعبي الـMatch.", ephemeral=True)
         loser = match["player2_id"] if winner.id == match["player1_id"] else match["player1_id"]
-        await self.db.execute("UPDATE tournament_matches SET winner_id=?,status='completed',reported_by=? WHERE id=? AND status='pending'", (winner.id, interaction.user.id, match_id))
-        await self.db.execute("UPDATE tournament_participants SET eliminated=1 WHERE tournament_id=? AND user_id=?", (tournament_id, loser))
+        cur = await self.db.execute("UPDATE tournament_matches SET winner_id=?,status='completed',reported_by=? WHERE id=? AND status='pending'", (winner.id, interaction.user.id, match_id))
+        if cur.rowcount != 1:
+            return await interaction.response.send_message("⚠️ هاد الـMatch تسجلت نتيجتو فـنفس الوقت. عاود تحقق من الحالة.", ephemeral=True)
+        await self.db.execute("UPDATE tournament_participants SET eliminated=1 WHERE tournament_id=? AND user_id=? AND eliminated=0", (tournament_id, loser))
         await self._progress(winner.id, win=True)
 
         current_round = int(match["round_no"])
         participants_left = await self.db.fetchone("SELECT COUNT(*) FROM tournament_participants WHERE tournament_id=? AND eliminated=0", (tournament_id,))
         if participants_left[0] == 1:
-            await self.db.execute("UPDATE tournaments SET status='completed',winner_id=?,ended_at=? WHERE id=? AND status='running'", (winner.id, time.time(), tournament_id))
-            await self.db.add_balance(winner.id, interaction.guild.id, int(t["reward"]))
-            await self._progress(winner.id, champion=True)
-            return await interaction.response.send_message(embed=EmbedFactory.success("🏆 بطل البطولة", f"مبروك {winner.mention}! ربحت **{t['name']}**.\nالمكافأة: **{t['reward']:,} ANOCoin**\nQuest Champion reward: **{CHAMPION_REWARD:,} ANOCoin** إذا كانت المرحلة النهائية مكتملة."))
+            final_update = await self.db.execute("UPDATE tournaments SET status='completed',winner_id=?,ended_at=? WHERE id=? AND status='running'", (winner.id, time.time(), tournament_id))
+            if final_update.rowcount == 1:
+                await self.db.add_balance(winner.id, interaction.guild.id, int(t["reward"]))
+                await self._progress(winner.id, champion=True)
+                return await interaction.response.send_message(embed=EmbedFactory.success("🏆 بطل البطولة", f"مبروك {winner.mention}! ربحت **{t['name']}**.\nالمكافأة: **{t['reward']:,} ANOCoin**\nQuest Champion reward: **{CHAMPION_REWARD:,} ANOCoin** إذا كانت المرحلة النهائية مكتملة."))
 
         next_round = current_round + 1
         completed_count = await self.db.fetchone("SELECT COUNT(*) FROM tournament_matches WHERE tournament_id=? AND round_no=? AND status='completed'", (tournament_id, current_round))
