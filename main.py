@@ -17,6 +17,20 @@ from utils.logger import BotLogger
 load_dotenv()
 discord.timedelta = timedelta
 
+LEGACY_TICKET_COMMANDS = {
+    "ticket-option-add",
+    "ticket-option-remove",
+    "ticket-panel",
+    "ticket-panels",
+    "ticket-setup",
+    "ticket-setup-panel",
+    "ticket-publish",
+    "ticket-option",
+    "close-ticket",
+    "delete-ticket",
+    "tickets",
+}
+
 
 class Ader(commands.Bot):
     def __init__(self, config: dict):
@@ -68,6 +82,11 @@ class Ader(commands.Bot):
                     exc_info=True,
                 )
 
+        # These commands belonged to older Ticket implementations. Remove any
+        # local definitions that may still be present before the next global sync.
+        for command_name in LEGACY_TICKET_COMMANDS:
+            self.tree.remove_command(command_name)
+
         self.logger.info(f"Loaded {loaded} cogs")
 
     async def on_ready(self):
@@ -88,16 +107,11 @@ class Ader(commands.Bot):
         )
 
         # Keep Ader's application commands GLOBAL only.
-        # Previous versions copied every global command into every guild,
-        # which left stale guild-scoped copies and could make commands appear
-        # twice after several restarts/deployments.
         try:
             synced = await self.tree.sync()
             self.logger.info(f"Synced {len(synced)} global application commands")
 
-            # Remove old guild-scoped copies created by the previous sync
-            # implementation. We intentionally do NOT copy global commands back
-            # into guilds; Discord will use the global command set.
+            # Remove old guild-scoped copies created by previous deployments.
             for guild in self.guilds:
                 try:
                     self.tree.clear_commands(guild=guild)
