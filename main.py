@@ -1,13 +1,11 @@
 """Ader Ultimate Discord bot entry point."""
 import asyncio
 import os
-import sys
 import time
 from pathlib import Path
 from datetime import timedelta
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 import yaml
 from dotenv import load_dotenv
@@ -26,7 +24,6 @@ async def _context_send(self, *args, **kwargs):
     if content.strip().startswith("!") and getattr(self, "message", None) is not None:
         kwargs.setdefault("mention_author", False)
         kwargs.setdefault("reference", self.message)
-        return await _original_context_send(self, *args, **kwargs)
     return await _original_context_send(self, *args, **kwargs)
 
 
@@ -39,11 +36,7 @@ class Ader(commands.Bot):
         intents.message_content = True
         intents.members = True
         intents.presences = True
-        super().__init__(
-            command_prefix=config.get("bot", {}).get("prefix", "/"),
-            intents=intents,
-            help_command=None,
-        )
+        super().__init__(command_prefix=config.get("bot", {}).get("prefix", "/"), intents=intents, help_command=None)
         self.config = config
         self.start_time = discord.utils.utcnow()
         self.logger = BotLogger(config.get("logging", {}))
@@ -57,12 +50,9 @@ class Ader(commands.Bot):
         directory = Path(__file__).parent / "cogs"
         loaded = 0
         disabled = {
-            "application_system.py",
-            "application_system_v2.py",
-            "application_system_v3.py",
-            "leveling.py",
+            "application_system.py", "application_system_v2.py", "application_system_v3.py",
+            "leveling.py", "tickets.py",
         }
-
         for path in sorted(directory.glob("*.py")):
             if path.stem.startswith("_") or path.stem == "__init__" or path.name in disabled:
                 continue
@@ -77,61 +67,40 @@ class Ader(commands.Bot):
             except Exception as exc:
                 self.logger.error(f"Failed to load cog {path.stem}: {exc}", exc_info=True)
 
-        self._remove_all_legacy_ticket_commands()
+        self._remove_legacy_ticket_commands()
         self._replace_owner_give_command()
         self.logger.info(f"Loaded {loaded} cogs")
 
-    def _remove_all_legacy_ticket_commands(self):
-        """Keep exactly /ticket; remove every other ticket-named application command."""
+    def _remove_legacy_ticket_commands(self):
         for command in list(self.tree.get_commands()):
             name = str(command.name).lower()
-            if name != "ticket" and ("ticket" in name or name in {"tickets", "close-ticket", "delete-ticket"}):
+            if name != "ticket" and "ticket" in name:
                 self.tree.remove_command(command.name)
 
     def _replace_owner_give_command(self):
-        """Register exactly one idempotent owner-only !اعطي command."""
         while self.get_command("اعطي") is not None:
             self.remove_command("اعطي")
 
         @self.command(name="اعطي", help="Owner-only ANOCoin grant")
         async def owner_give(ctx: commands.Context, member: discord.Member | None = None, amount: int | None = None):
-            owner_id = 1472570059367911587
-            if ctx.author.id != owner_id:
+            if ctx.author.id != 1472570059367911587:
                 return
-            if member is None or amount is None or amount <= 0 or member.bot or ctx.guild is None:
+            if ctx.guild is None or member is None or amount is None or amount <= 0 or member.bot:
                 return await ctx.send("❌ الاستعمال: `!اعطي @user المبلغ`", delete_after=6)
-
-            # The message ID is the idempotency key. This prevents the same Discord
-            # message from crediting the recipient twice, even if the handler is
-            # accidentally invoked more than once against the same SQLite DB.
             key = f"owner-give:{ctx.message.id}"
-            cur = await self.db.execute(
-                "INSERT OR IGNORE INTO processed_commands(command_key, created_at) VALUES(?, ?)",
-                (key, time.time()),
-            )
+            cur = await self.db.execute("INSERT OR IGNORE INTO processed_commands(command_key,created_at) VALUES(?,?)", (key, time.time()))
             if cur.rowcount != 1:
                 return await ctx.send("⚠️ هاد الأمر راه تعالج من قبل.", delete_after=6)
-
-            ok = await self.db.add_balance(member.id, ctx.guild.id, amount)
-            if not ok:
-                return await ctx.send("❌ تعذر إضافة العملة. عاود المحاولة.", delete_after=6)
-            new_balance = await self.db.get_balance(member.id)
-            await ctx.send(
-                f"🪙 تم إعطاء {member.mention} **{amount:,} ANOCoin**. "
-                f"الرصيد الجديد: **{new_balance:,} ANOCoin**."
-            )
+            if not await self.db.add_balance(member.id, ctx.guild.id, amount):
+                return await ctx.send("❌ تعذر إضافة العملة.", delete_after=6)
+            balance = await self.db.get_balance(member.id)
+            await ctx.send(f"🪙 تم إعطاء {member.mention} **{amount:,} ANOCoin**. الرصيد الجديد: **{balance:,} ANOCoin**.")
 
     async def on_ready(self):
-        types = {
-            "playing": discord.ActivityType.playing,
-            "watching": discord.ActivityType.watching,
-            "listening": discord.ActivityType.listening,
-            "streaming": discord.ActivityType.streaming,
-        }
+        types = {"playing": discord.ActivityType.playing, "watching": discord.ActivityType.watching, "listening": discord.ActivityType.listening, "streaming": discord.ActivityType.streaming}
         typ = self.config.get("bot", {}).get("activity_type", "watching")
         text = self.config.get("bot", {}).get("activity", "مجتمعك")
         await self.change_presence(activity=discord.Activity(type=types.get(typ, discord.ActivityType.watching), name=text))
-
         try:
             synced = await self.tree.sync()
             self.logger.info(f"Synced {len(synced)} global application commands")
@@ -163,8 +132,7 @@ async def main():
     token = os.getenv("DISCORD_TOKEN") or config.get("bot", {}).get("token")
     if not token:
         raise RuntimeError("DISCORD_TOKEN is not configured")
-    bot = Ader(config)
-    await bot.start(token)
+    await Ader(config).start(token)
 
 
 if __name__ == "__main__":
