@@ -18,16 +18,17 @@ load_dotenv()
 discord.timedelta = timedelta
 
 # Prefix shortcuts should answer as replies to the triggering message without
-# pinging its author. This also covers configurable shortcuts from cogs/shortcuts.py
-# without making each shortcut implementation duplicate reply logic.
+# pinging its author. Use the original Context.send implementation with a
+# message reference rather than Context.reply, avoiding recursive monkey-patching.
 _original_context_send = commands.Context.send
 
 
 async def _context_send(self, *args, **kwargs):
     content = getattr(getattr(self, "message", None), "content", "") or ""
-    if content.strip().startswith("!") and hasattr(self, "reply"):
+    if content.strip().startswith("!") and getattr(self, "message", None) is not None:
         kwargs.setdefault("mention_author", False)
-        return await self.reply(*args, **kwargs)
+        kwargs.setdefault("reference", self.message)
+        return await _original_context_send(self, *args, **kwargs)
     return await _original_context_send(self, *args, **kwargs)
 
 
