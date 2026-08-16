@@ -1,199 +1,615 @@
+"""Ader Ticket Tool.
+
+This is the single ticket implementation. The only application command exposed by
+this module is /ticket; panel creation/management happens through UI components.
+"""
 from __future__ import annotations
-import asyncio,re,discord
+
+import asyncio
+import re
+from typing import Optional
+
+import discord
 from discord import app_commands
 from discord.ext import commands
+
 from utils.embeds import EmbedColor
 from utils.permissions import is_admin
 
-MAX_OPTIONS=25
+MAX_OPTIONS = 25
 
-def clean(v): return re.sub(r"[^a-zA-Z0-9_-]+","-",str(v).strip().lower()).strip("-")[:90] or "ticket"
+
+def clean_name(value: str, fallback: str = "ticket") -> str:
+    value = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(value).strip().lower()).strip("-")
+    return value[:90] or fallback
+
+
+def valid_url(value: Optional[str]) -> Optional[str]:
+    value = (value or "").strip()
+    if not value:
+        return None
+    if not value.startswith(("https://", "http://")):
+        return None
+    return value[:1000]
+
 
 class TicketControls(discord.ui.View):
-    def __init__(self,cog,cid):
-        super().__init__(timeout=None);self.add_item(Claim(cog,cid));self.add_item(Close(cog,cid));self.add_item(Delete(cog,cid))
-class Claim(discord.ui.Button):
-    def __init__(self,cog,cid):super().__init__(label="Claim",emoji="🙋",style=discord.ButtonStyle.success,custom_id=f"ader:t:c:{cid}");self.cog=cog;self.cid=cid
-    async def callback(self,i):
-        if not await self.cog.staff(i):return await i.response.send_message("❌ Staff فقط.",ephemeral=True)
-        t=await self.cog.ticket(self.cid)
-        if not t:return await i.response.send_message("❌ التذكرة مسدودة.",ephemeral=True)
-        if t["user_id"]==i.user.id:return await i.response.send_message("❌ صاحب التذكرة ما يقدرش يدير Claim لنفسو.",ephemeral=True)
-        r=await self.cog.db.execute("UPDATE tickets SET claimed_by=? WHERE id=? AND status='open' AND claimed_by IS NULL",(i.user.id,t["id"]))
-        if r.rowcount!=1:return await i.response.send_message("❌ شي Staff آخر تكفّل بها.",ephemeral=True)
-        await i.response.send_message(f"🙋 {i.user.mention} تكفّل بالتذكرة.")
-class Close(discord.ui.Button):
-    def __init__(self,cog,cid):super().__init__(label="Close",emoji="🔒",style=discord.ButtonStyle.secondary,custom_id=f"ader:t:o:{cid}");self.cog=cog;self.cid=cid
-    async def callback(self,i):await self.cog.close(i,self.cid)
-class Delete(discord.ui.Button):
-    def __init__(self,cog,cid):super().__init__(label="Delete",emoji="🗑️",style=discord.ButtonStyle.danger,custom_id=f"ader:t:d:{cid}");self.cog=cog;self.cid=cid
-    async def callback(self,i):
-        if not await self.cog.staff(i):return await i.response.send_message("❌ Staff فقط.",ephemeral=True)
-        r=await self.cog.db.execute("UPDATE tickets SET status='deleted',closed_at=? WHERE channel_id=? AND status='open'",(discord.utils.utcnow().timestamp(),self.cid))
-        if r.rowcount!=1:return await i.response.send_message("❌ التذكرة تسدات من قبل.",ephemeral=True)
-        await i.response.send_message("🗑️ غادي يتحيد الروم بعد 2 ثواني.");await asyncio.sleep(2)
-        try:await i.channel.delete(reason="Ader ticket delete")
-        except discord.HTTPException:pass
+    def __init__(self, cog: "TicketManager", channel_id: int):
+        super().__init__(timeout=None)
+        self.add_item(TicketClaimButton(cog, channel_id))
+        self.add_item(TicketCloseButton(cog, channel_id))
+        self.add_item(TicketDeleteButton(cog, channel_id))
 
-class OpenButton(discord.ui.Button):
-    def __init__(self,cog,pid,n,x):super().__init__(label=str(x.get("name") or "فتح تذكرة")[:80],emoji=x.get("emoji") or "🎫",style=discord.ButtonStyle.primary,custom_id=f"ader:t:open:{pid}:{n}");self.cog=cog;self.pid=pid;self.n=n
-    async def callback(self,i):await self.cog.create(i,self.pid,self.n)
-class OpenSelect(discord.ui.Select):
-    def __init__(self,cog,p):
-        opts=[discord.SelectOption(label=str(x.get("name") or "Ticket")[:100],description=str(x.get("description") or "فتح تذكرة")[:100],emoji=x.get("emoji") or "🎫",value=str(n)) for n,x in enumerate(p.get("options",[])[:25])]
-        super().__init__(placeholder="اختار نوع التذكرة...",options=opts or [discord.SelectOption(label="فتح تذكرة",value="0",emoji="🎫")],custom_id=f"ader:t:s:{p['id']}");self.cog=cog;self.pid=p["id"]
-    async def callback(self,i):await self.cog.create(i,self.pid,int(self.values[0]))
-class PanelView(discord.ui.View):
-    def __init__(self,cog,p):
-        super().__init__(timeout=None);xs=p.get("options",[]) or [{"name":"فتح تذكرة","emoji":"🎫"}]
-        if p.get("mode")=="select":self.add_item(OpenSelect(cog,{**p,"options":xs}))
-        else:
-            for n,x in enumerate(xs[:25]):self.add_item(OpenButton(cog,p["id"],n,x))
 
-class CreateModal(discord.ui.Modal,title="Create a Panel"):
-    titlex=discord.ui.TextInput(label="Panel title",default="🎫 الدعم الفني",max_length=256)
-    desc=discord.ui.TextInput(label="Panel description",style=discord.TextStyle.paragraph,default="اختار القسم المناسب لفتح تذكرة.",max_length=4000)
-    image=discord.ui.TextInput(label="Panel image URL",required=False,max_length=1000)
-    ticketdesc=discord.ui.TextInput(label="Default ticket description",style=discord.TextStyle.paragraph,default="شرح لينا المشكل ديالك بالتفصيل.",max_length=2000)
-    def __init__(self,cog):super().__init__();self.cog=cog
-    async def on_submit(self,i):
-        s={"guild_id":i.guild.id,"title":str(self.titlex),"description":str(self.desc),"image_url":str(self.image).strip() or None,"ticket_description":str(self.ticketdesc),"mode":"buttons","category_id":None,"channel_id":None,"support_role_id":None,"button_label":"فتح تذكرة","button_emoji":"🎫","options":[{"name":"فتح تذكرة","emoji":"🎫","description":str(self.ticketdesc),"ticket_name":"ticket-{user}","image_url":None}]}
-        await i.response.send_message("خصّص الـPanel ثم نشره:",embed=self.cog.preview(s),view=Builder(self.cog,s),ephemeral=True)
-class TypeModal(discord.ui.Modal,title="Add Ticket Type"):
-    name=discord.ui.TextInput(label="Name",max_length=80);emoji=discord.ui.TextInput(label="Emoji",default="🎫",max_length=20);tname=discord.ui.TextInput(label="Ticket channel name",default="ticket-{user}",max_length=80);desc=discord.ui.TextInput(label="Ticket description",style=discord.TextStyle.paragraph,max_length=2000);image=discord.ui.TextInput(label="Ticket image URL",required=False,max_length=1000)
-    def __init__(self,b):super().__init__();self.b=b
-    async def on_submit(self,i):
-        if len(self.b.s["options"])>=25:return await i.response.send_message("❌ الحد الأقصى 25.",ephemeral=True)
-        self.b.s["options"].append({"name":str(self.name),"emoji":str(self.emoji) or "🎫","ticket_name":str(self.tname),"description":str(self.desc),"image_url":str(self.image).strip() or None});await i.response.edit_message(embed=self.b.cog.preview(self.b.s),view=self.b)
+class TicketClaimButton(discord.ui.Button):
+    def __init__(self, cog: "TicketManager", channel_id: int):
+        super().__init__(label="Claim", emoji="🙋", style=discord.ButtonStyle.success,
+                         custom_id=f"ader:ticket:claim:{channel_id}")
+        self.cog, self.channel_id = cog, channel_id
 
-class Builder(discord.ui.View):
-    def __init__(self,cog,s,pid=None):
-        super().__init__(timeout=900);self.cog=cog;self.s=s;self.pid=pid;self.add_item(Cat(self));self.add_item(Channel(self));self.add_item(Role(self));self.add_item(Mode(self))
-    @discord.ui.button(label="Add Ticket Type",emoji="➕",style=discord.ButtonStyle.secondary,row=4)
-    async def add(self,i,b):await i.response.send_modal(TypeModal(self))
-    @discord.ui.button(label="Remove Last Type",emoji="➖",style=discord.ButtonStyle.secondary,row=4)
-    async def rem(self,i,b):
-        if len(self.s["options"])<=1:return await i.response.send_message("❌ خاص يبقى واحد على الأقل.",ephemeral=True)
-        self.s["options"].pop();await i.response.edit_message(embed=self.cog.preview(self.s),view=self)
-    @discord.ui.button(label="Send Panel to Channel",emoji="📤",style=discord.ButtonStyle.success,row=4)
-    async def send(self,i,b):
-        if not self.s.get("category_id") or not self.s.get("channel_id"):return await i.response.send_message("❌ اختار Category وChannel.",ephemeral=True)
-        ch=i.guild.get_channel(self.s["channel_id"]);cat=i.guild.get_channel(self.s["category_id"])
-        if not isinstance(ch,discord.TextChannel) or not isinstance(cat,discord.CategoryChannel):return await i.response.send_message("❌ Channel أو Category غير صالح.",ephemeral=True)
-        await i.response.defer(ephemeral=True);pid=self.pid;created=False
+    async def callback(self, interaction: discord.Interaction):
+        if not await self.cog.is_staff(interaction):
+            return await interaction.response.send_message("❌ هاد الزر مخصص للـStaff.", ephemeral=True)
+        ticket = await self.cog.get_open_ticket(self.channel_id)
+        if not ticket:
+            return await interaction.response.send_message("❌ هادي ماشي تذكرة مفتوحة.", ephemeral=True)
+        if int(ticket["user_id"]) == interaction.user.id:
+            return await interaction.response.send_message("❌ صاحب التذكرة ما يقدرش يدير Claim لنفسو.", ephemeral=True)
+        cur = await self.cog.db.execute(
+            "UPDATE tickets SET claimed_by=? WHERE id=? AND status='open' AND claimed_by IS NULL",
+            (interaction.user.id, ticket["id"]),
+        )
+        if cur.rowcount != 1:
+            return await interaction.response.send_message("❌ شي Staff آخر تكفّل بها.", ephemeral=True)
+        await interaction.response.send_message(f"🙋 {interaction.user.mention} تكفّل بالتذكرة.")
+
+
+class TicketCloseButton(discord.ui.Button):
+    def __init__(self, cog: "TicketManager", channel_id: int):
+        super().__init__(label="Close", emoji="🔒", style=discord.ButtonStyle.secondary,
+                         custom_id=f"ader:ticket:close:{channel_id}")
+        self.cog, self.channel_id = cog, channel_id
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.cog.close_ticket(interaction, self.channel_id)
+
+
+class TicketDeleteButton(discord.ui.Button):
+    def __init__(self, cog: "TicketManager", channel_id: int):
+        super().__init__(label="Delete", emoji="🗑️", style=discord.ButtonStyle.danger,
+                         custom_id=f"ader:ticket:delete:{channel_id}")
+        self.cog, self.channel_id = cog, channel_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await self.cog.is_staff(interaction):
+            return await interaction.response.send_message("❌ حذف التذكرة مخصص للـStaff.", ephemeral=True)
+        cur = await self.cog.db.execute(
+            "UPDATE tickets SET status='deleted', closed_at=? "
+            "WHERE channel_id=? AND status IN ('open','closed')",
+            (discord.utils.utcnow().timestamp(), self.channel_id),
+        )
+        if cur.rowcount != 1:
+            return await interaction.response.send_message("❌ التذكرة تسدات/تحيدات من قبل.", ephemeral=True)
+        await interaction.response.send_message("🗑️ غادي يتحيد الروم بعد ثانيتين.")
+        await asyncio.sleep(2)
         try:
-            if pid:
-                if not await self.cog.db.get_ticket_panel(pid):return await i.followup.send("❌ Panel ما بقاتش موجودة.",ephemeral=True)
-                await self.cog.db.update_ticket_panel(pid,{**self.s,"channel_id":ch.id});p=await self.cog.db.get_ticket_panel(pid)
-            else:
-                pid=await self.cog.db.create_ticket_panel({**self.s,"channel_id":ch.id});created=True;p=await self.cog.db.get_ticket_panel(pid)
-            msg=await ch.send(embed=self.cog.panel_embed(p),view=PanelView(self.cog,p));await self.cog.db.update_ticket_panel(pid,{"channel_id":ch.id,"message_id":msg.id});self.cog.bot.add_view(PanelView(self.cog,p),message_id=msg.id)
-            await i.followup.send(f"✅ تم حفظ ونشر Panel **#{pid}** في {ch.mention}.",ephemeral=True)
-        except Exception as e:
-            print(f"Ticket panel error: {e!r}")
-            if created and pid:
-                try:await self.cog.db.delete_ticket_panel(pid)
-                except Exception:pass
-            await i.followup.send("❌ فشل حفظ/نشر الـPanel. راجع صلاحيات البوت على Channel وCategory.",ephemeral=True)
-class Cat(discord.ui.ChannelSelect):
-    def __init__(self,b):super().__init__(channel_types=[discord.ChannelType.category],placeholder="Ticket Category",row=0);self.b=b
-    async def callback(self,i):self.b.s["category_id"]=self.values[0].id;await i.response.edit_message(embed=self.b.cog.preview(self.b.s),view=self.b)
-class Channel(discord.ui.ChannelSelect):
-    def __init__(self,b):super().__init__(channel_types=[discord.ChannelType.text],placeholder="Panel Channel",row=1);self.b=b
-    async def callback(self,i):self.b.s["channel_id"]=self.values[0].id;await i.response.edit_message(embed=self.b.cog.preview(self.b.s),view=self.b)
-class Role(discord.ui.RoleSelect):
-    def __init__(self,b):super().__init__(placeholder="Staff Role (اختياري)",row=2,min_values=0,max_values=1);self.b=b
-    async def callback(self,i):self.b.s["support_role_id"]=self.values[0].id if self.values else None;await i.response.edit_message(embed=self.b.cog.preview(self.b.s),view=self.b)
-class Mode(discord.ui.Select):
-    def __init__(self,b):super().__init__(placeholder="Buttons / Select Menu",options=[discord.SelectOption(label="Buttons",value="buttons",emoji="🔘"),discord.SelectOption(label="Select Menu",value="select",emoji="📋")],row=3);self.b=b
-    async def callback(self,i):self.b.s["mode"]=self.values[0];await i.response.edit_message(embed=self.b.cog.preview(self.b.s),view=self.b)
+            await interaction.channel.delete(reason=f"Ticket deleted by {interaction.user}")
+        except discord.HTTPException:
+            pass
 
-class Home(discord.ui.View):
-    def __init__(self,cog):super().__init__(timeout=300);self.cog=cog
-    @discord.ui.button(label="Create a Panel",emoji="➕",style=discord.ButtonStyle.primary)
-    async def create(self,i,b):await i.response.send_modal(CreateModal(self.cog))
-    @discord.ui.button(label="Manage Panels",emoji="⚙️",style=discord.ButtonStyle.secondary)
-    async def manage(self,i,b):
-        ps=await self.cog.db.list_ticket_panels(i.guild.id)
-        if not ps:return await i.response.send_message("❌ ما كاين حتى Panel.",ephemeral=True)
-        await i.response.edit_message(embed=discord.Embed(title="🎫 Manage Panels",description="اختار Panel من القائمة.",color=EmbedColor.PRIMARY),view=Manage(self.cog,ps))
-class Manage(discord.ui.View):
-    def __init__(self,cog,ps):super().__init__(timeout=600);self.cog=cog;self.pid=None;self.add_item(PanelSelect(self,ps))
-    @discord.ui.button(label="Edit Panel",emoji="✏️",style=discord.ButtonStyle.primary,row=1)
-    async def edit(self,i,b):
-        if not self.pid:return await i.response.send_message("❌ اختار Panel.",ephemeral=True)
-        p=await self.cog.db.get_ticket_panel(self.pid);await i.response.edit_message(embed=self.cog.preview(p),view=Builder(self.cog,p,p["id"]))
-    @discord.ui.button(label="Send Panel",emoji="📤",style=discord.ButtonStyle.success,row=1)
-    async def send(self,i,b):
-        if not self.pid:return await i.response.send_message("❌ اختار Panel.",ephemeral=True)
-        p=await self.cog.db.get_ticket_panel(self.pid);await i.response.edit_message(embed=self.cog.preview(p),view=Builder(self.cog,p,p["id"]))
-    @discord.ui.button(label="Delete Panel",emoji="🗑️",style=discord.ButtonStyle.danger,row=1)
-    async def delete(self,i,b):
-        if not self.pid:return await i.response.send_message("❌ اختار Panel.",ephemeral=True)
-        p=await self.cog.db.get_ticket_panel(self.pid)
-        if p and p.get("channel_id") and p.get("message_id"):
-            ch=i.guild.get_channel(p["channel_id"])
-            if ch:
-                try:await (await ch.fetch_message(p["message_id"])).delete()
-                except discord.HTTPException:pass
-        await self.cog.db.delete_ticket_panel(self.pid);await i.response.edit_message(content="✅ تحيد الـPanel.",embed=None,view=None)
+
+class TicketOpenButton(discord.ui.Button):
+    def __init__(self, cog: "TicketManager", panel_id: int, option_index: int, label: str, emoji: str):
+        super().__init__(label=str(label or "فتح تذكرة")[:80], emoji=emoji or "🎫",
+                         style=discord.ButtonStyle.primary,
+                         custom_id=f"ader:ticket:open:{panel_id}:{option_index}")
+        self.cog, self.panel_id, self.option_index = cog, panel_id, option_index
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.cog.create_ticket_from_panel(interaction, self.panel_id, self.option_index)
+
+
+class TicketOpenSelect(discord.ui.Select):
+    def __init__(self, cog: "TicketManager", panel: dict):
+        options = []
+        for index, item in enumerate(panel.get("options", [])[:MAX_OPTIONS]):
+            options.append(discord.SelectOption(
+                label=str(item.get("name") or "فتح تذكرة")[:100],
+                description=str(item.get("description") or "فتح تذكرة")[:100] or None,
+                emoji=item.get("emoji") or "🎫",
+                value=str(index),
+            ))
+        if not options:
+            options = [discord.SelectOption(label="فتح تذكرة", value="0", emoji="🎫")]
+        super().__init__(placeholder="اختار نوع التذكرة...", min_values=1, max_values=1,
+                         options=options, custom_id=f"ader:ticket:select:{panel['id']}")
+        self.cog, self.panel_id = cog, panel["id"]
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.cog.create_ticket_from_panel(interaction, self.panel_id, int(self.values[0]))
+
+
+class TicketPanelView(discord.ui.View):
+    def __init__(self, cog: "TicketManager", panel: dict):
+        super().__init__(timeout=None)
+        options = panel.get("options", []) or [{"name": "فتح تذكرة", "emoji": "🎫"}]
+        if panel.get("mode") == "select":
+            self.add_item(TicketOpenSelect(cog, {**panel, "options": options}))
+        else:
+            for index, item in enumerate(options[:MAX_OPTIONS]):
+                self.add_item(TicketOpenButton(cog, panel["id"], index,
+                                                item.get("name", "فتح تذكرة"), item.get("emoji", "🎫")))
+
+
+class CreatePanelModal(discord.ui.Modal, title="Create a Panel"):
+    title_input = discord.ui.TextInput(label="Panel name / title", default="🎫 الدعم الفني", max_length=256)
+    description_input = discord.ui.TextInput(
+        label="Panel description", style=discord.TextStyle.paragraph,
+        default="اختار القسم المناسب لفتح تذكرة.", max_length=4000,
+    )
+    image_input = discord.ui.TextInput(label="Panel image URL (optional)", required=False, max_length=1000)
+    ticket_desc_input = discord.ui.TextInput(
+        label="Default ticket description", style=discord.TextStyle.paragraph,
+        required=False, default="شرح لينا المشكل ديالك بالتفصيل.", max_length=2000,
+    )
+
+    def __init__(self, cog: "TicketManager"):
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        state = {
+            "guild_id": interaction.guild.id,
+            "title": str(self.title_input).strip(),
+            "description": str(self.description_input).strip(),
+            "image_url": valid_url(str(self.image_input)),
+            "ticket_description": str(self.ticket_desc_input).strip(),
+            "mode": "buttons",
+            "button_label": "فتح تذكرة",
+            "button_emoji": "🎫",
+            "category_id": None,
+            "channel_id": None,
+            "support_role_id": None,
+            "options": [{
+                "name": "فتح تذكرة", "emoji": "🎫",
+                "description": str(self.ticket_desc_input).strip(),
+                "ticket_name": "ticket-{user}", "image_url": None,
+            }],
+        }
+        await interaction.response.send_message(
+            "خصّص الـPanel ثم نشره:",
+            embed=self.cog.preview_embed(state),
+            view=PanelBuilderView(self.cog, state),
+            ephemeral=True,
+        )
+
+
+class AddTicketTypeModal(discord.ui.Modal, title="Add Ticket Type"):
+    name_input = discord.ui.TextInput(label="Button / option name", max_length=80)
+    emoji_input = discord.ui.TextInput(label="Emoji", default="🎫", max_length=20)
+    ticket_name_input = discord.ui.TextInput(label="Ticket channel name", default="ticket-{user}", max_length=80)
+    description_input = discord.ui.TextInput(label="Ticket description", style=discord.TextStyle.paragraph, max_length=2000)
+    image_input = discord.ui.TextInput(label="Ticket image URL (optional)", required=False, max_length=1000)
+
+    def __init__(self, builder: "PanelBuilderView"):
+        super().__init__()
+        self.builder = builder
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if len(self.builder.state["options"]) >= MAX_OPTIONS:
+            return await interaction.response.send_message("❌ Discord كيسمح بحد أقصى 25 اختيار داخل Panel واحد.", ephemeral=True)
+        self.builder.state["options"].append({
+            "name": str(self.name_input).strip()[:80],
+            "emoji": str(self.emoji_input).strip() or "🎫",
+            "ticket_name": str(self.ticket_name_input).strip() or "ticket-{user}",
+            "description": str(self.description_input).strip(),
+            "image_url": valid_url(str(self.image_input)),
+        })
+        await interaction.response.edit_message(
+            embed=self.builder.cog.preview_embed(self.builder.state), view=self.builder
+        )
+
+
+class PanelBuilderView(discord.ui.View):
+    def __init__(self, cog: "TicketManager", state: dict, existing_panel_id: Optional[int] = None):
+        super().__init__(timeout=900)
+        self.cog = cog
+        self.state = state
+        self.existing_panel_id = existing_panel_id
+        self._saving = False
+        self.add_item(CategorySelect(self))
+        self.add_item(ChannelSelect(self))
+        self.add_item(RoleSelect(self))
+        self.add_item(ModeSelect(self))
+
+    @discord.ui.button(label="Add Ticket Type", style=discord.ButtonStyle.secondary, emoji="➕", row=4)
+    async def add_type(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddTicketTypeModal(self))
+
+    @discord.ui.button(label="Remove Last Type", style=discord.ButtonStyle.secondary, emoji="➖", row=4)
+    async def remove_type(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if len(self.state["options"]) <= 1:
+            return await interaction.response.send_message("❌ خاص Panel يبقى فيه اختيار واحد على الأقل.", ephemeral=True)
+        self.state["options"].pop()
+        await interaction.response.edit_message(embed=self.cog.preview_embed(self.state), view=self)
+
+    @discord.ui.button(label="Send Panel to Channel", style=discord.ButtonStyle.success, emoji="📤", row=4)
+    async def send_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self._saving:
+            return await interaction.response.send_message("⏳ عملية الحفظ راه خدامة، تسنى لحظة.", ephemeral=True)
+        if not self.state.get("category_id") or not self.state.get("channel_id"):
+            return await interaction.response.send_message("❌ اختار Category وChannel قبل الحفظ.", ephemeral=True)
+        channel = interaction.guild.get_channel(self.state["channel_id"])
+        category = interaction.guild.get_channel(self.state["category_id"])
+        if not isinstance(channel, discord.TextChannel) or not isinstance(category, discord.CategoryChannel):
+            return await interaction.response.send_message("❌ الـChannel أو الـCategory المختار غير صالح.", ephemeral=True)
+        me = interaction.guild.me
+        if me is None or not channel.permissions_for(me).send_messages or not category.permissions_for(me).manage_channels:
+            return await interaction.response.send_message("❌ البوت خاصو صلاحيات إرسال الرسائل وManage Channels فالمكان المختار.", ephemeral=True)
+
+        self._saving = True
+        button.disabled = True
+        await interaction.response.defer(ephemeral=True)
+        await interaction.edit_original_response(view=self)
+
+        created_id = None
+        sent_message = None
+        try:
+            if self.existing_panel_id is None:
+                created_id = await self.cog.db.create_ticket_panel(self.state)
+                panel = await self.cog.db.get_ticket_panel(created_id)
+                if not panel:
+                    raise RuntimeError("panel row was not readable after insert")
+                sent_message = await channel.send(embed=self.cog.panel_embed(panel), view=TicketPanelView(self.cog, panel))
+                if not await self.cog.db.update_ticket_panel(created_id, {
+                    "channel_id": channel.id, "message_id": sent_message.id,
+                }):
+                    raise RuntimeError("panel message id could not be saved")
+                self.cog.bot.add_view(TicketPanelView(self.cog, panel), message_id=sent_message.id)
+                await interaction.followup.send(
+                    f"✅ تم حفظ ونشر Panel **#{created_id}** في {channel.mention}.", ephemeral=True
+                )
+            else:
+                panel = await self.cog.db.get_ticket_panel(self.existing_panel_id)
+                if not panel or int(panel["guild_id"]) != interaction.guild.id:
+                    raise RuntimeError("panel not found")
+                await self.cog.db.update_ticket_panel(self.existing_panel_id, {
+                    **self.state, "channel_id": channel.id,
+                })
+                panel = await self.cog.db.get_ticket_panel(self.existing_panel_id)
+                old_message = None
+                if panel and panel.get("message_id") and int(panel.get("channel_id") or 0) == channel.id:
+                    try:
+                        old_message = await channel.fetch_message(int(panel["message_id"]))
+                    except discord.NotFound:
+                        old_message = None
+                    except discord.HTTPException:
+                        old_message = None
+                if old_message:
+                    await old_message.edit(embed=self.cog.panel_embed(panel), view=TicketPanelView(self.cog, panel))
+                    sent_message = old_message
+                else:
+                    sent_message = await channel.send(embed=self.cog.panel_embed(panel), view=TicketPanelView(self.cog, panel))
+                    await self.cog.db.update_ticket_panel(self.existing_panel_id, {"message_id": sent_message.id})
+                self.cog.bot.add_view(TicketPanelView(self.cog, panel), message_id=sent_message.id)
+                await interaction.followup.send("✅ تم تحديث ونشر الـPanel بنجاح.", ephemeral=True)
+        except Exception as exc:
+            print(f"[TicketPanel] save error: {exc!r}")
+            if sent_message and self.existing_panel_id is None:
+                try:
+                    await sent_message.delete()
+                except discord.HTTPException:
+                    pass
+            if created_id is not None:
+                try:
+                    await self.cog.db.delete_ticket_panel(created_id)
+                except Exception as cleanup_exc:
+                    print(f"[TicketPanel] rollback error: {cleanup_exc!r}")
+            await interaction.followup.send(
+                "❌ فشل حفظ البيانات. حاول مرة أخرى. تأكد من صلاحيات البوت ثم عاود المحاولة.",
+                ephemeral=True,
+            )
+        finally:
+            self._saving = False
+            button.disabled = False
+
+
+class CategorySelect(discord.ui.ChannelSelect):
+    def __init__(self, builder: PanelBuilderView):
+        super().__init__(channel_types=[discord.ChannelType.category], placeholder="اختار Ticket Category", row=0)
+        self.builder = builder
+
+    async def callback(self, interaction: discord.Interaction):
+        self.builder.state["category_id"] = self.values[0].id
+        await interaction.response.edit_message(embed=self.builder.cog.preview_embed(self.builder.state), view=self.builder)
+
+
+class ChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, builder: PanelBuilderView):
+        super().__init__(channel_types=[discord.ChannelType.text], placeholder="اختار Channel لنشر الـPanel", row=1)
+        self.builder = builder
+
+    async def callback(self, interaction: discord.Interaction):
+        self.builder.state["channel_id"] = self.values[0].id
+        await interaction.response.edit_message(embed=self.builder.cog.preview_embed(self.builder.state), view=self.builder)
+
+
+class RoleSelect(discord.ui.RoleSelect):
+    def __init__(self, builder: PanelBuilderView):
+        super().__init__(placeholder="اختار Staff / Support Role (اختياري)", row=2, min_values=0, max_values=1)
+        self.builder = builder
+
+    async def callback(self, interaction: discord.Interaction):
+        self.builder.state["support_role_id"] = self.values[0].id if self.values else None
+        await interaction.response.edit_message(embed=self.builder.cog.preview_embed(self.builder.state), view=self.builder)
+
+
+class ModeSelect(discord.ui.Select):
+    def __init__(self, builder: PanelBuilderView):
+        super().__init__(placeholder="Buttons / Select Menu", row=3, options=[
+            discord.SelectOption(label="Buttons", value="buttons", emoji="🔘"),
+            discord.SelectOption(label="Select Menu", value="select", emoji="📋"),
+        ])
+        self.builder = builder
+
+    async def callback(self, interaction: discord.Interaction):
+        self.builder.state["mode"] = self.values[0]
+        await interaction.response.edit_message(embed=self.builder.cog.preview_embed(self.builder.state), view=self.builder)
+
+
+class TicketHomeView(discord.ui.View):
+    def __init__(self, cog: "TicketManager"):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    @discord.ui.button(label="Create a Panel", style=discord.ButtonStyle.primary, emoji="➕")
+    async def create(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CreatePanelModal(self.cog))
+
+    @discord.ui.button(label="Manage Panels", style=discord.ButtonStyle.secondary, emoji="⚙️")
+    async def manage(self, interaction: discord.Interaction, button: discord.ui.Button):
+        panels = await self.cog.db.list_ticket_panels(interaction.guild.id)
+        if not panels:
+            return await interaction.response.send_message("❌ ما عندك حتى Panel مصايب.", ephemeral=True)
+        await interaction.response.edit_message(
+            embed=self.cog.manage_embed(panels), view=PanelManagerView(self.cog, panels)
+        )
+
+
+class PanelManagerView(discord.ui.View):
+    def __init__(self, cog: "TicketManager", panels: list[dict]):
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.panel_id: Optional[int] = None
+        self.add_item(PanelSelect(self, panels))
+
+    @discord.ui.button(label="Edit Panel", style=discord.ButtonStyle.primary, emoji="✏️", row=1)
+    async def edit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.panel_id is None:
+            return await interaction.response.send_message("❌ اختار Panel أولاً.", ephemeral=True)
+        panel = await self.cog.db.get_ticket_panel(self.panel_id)
+        if not panel:
+            return await interaction.response.send_message("❌ Panel ما بقاتش موجودة.", ephemeral=True)
+        await interaction.response.edit_message(
+            embed=self.cog.preview_embed(panel), view=PanelBuilderView(self.cog, panel, panel["id"])
+        )
+
+    @discord.ui.button(label="Delete Panel", style=discord.ButtonStyle.danger, emoji="🗑️", row=1)
+    async def delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.panel_id is None:
+            return await interaction.response.send_message("❌ اختار Panel أولاً.", ephemeral=True)
+        panel = await self.cog.db.get_ticket_panel(self.panel_id)
+        if not panel:
+            return await interaction.response.send_message("❌ Panel ما بقاتش موجودة.", ephemeral=True)
+        if panel.get("channel_id") and panel.get("message_id"):
+            channel = interaction.guild.get_channel(int(panel["channel_id"]))
+            if channel:
+                try:
+                    await (await channel.fetch_message(int(panel["message_id"]))).delete()
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+        await self.cog.db.delete_ticket_panel(self.panel_id)
+        await interaction.response.edit_message(content="✅ تحيد الـPanel نهائياً.", embed=None, view=None)
+
+
 class PanelSelect(discord.ui.Select):
-    def __init__(self,parent,ps):super().__init__(placeholder="اختار Panel...",options=[discord.SelectOption(label=f"#{p['id']} • {p['title'][:80]}",value=str(p['id'])) for p in ps[:25]]);self.parent=parent
-    async def callback(self,i):self.parent.pid=int(self.values[0]);p=await self.parent.cog.db.get_ticket_panel(self.parent.pid);await i.response.edit_message(embed=self.parent.cog.panel_details(p),view=self.parent)
+    def __init__(self, parent: PanelManagerView, panels: list[dict]):
+        options = [discord.SelectOption(
+            label=f"#{p['id']} • {str(p.get('title') or 'Panel')[:75]}", value=str(p["id"])
+        ) for p in panels[:MAX_OPTIONS]]
+        super().__init__(placeholder="اختار Panel...", options=options)
+        self.parent_view = parent
+
+    async def callback(self, interaction: discord.Interaction):
+        self.parent_view.panel_id = int(self.values[0])
+        panel = await self.parent_view.cog.db.get_ticket_panel(self.parent_view.panel_id)
+        await interaction.response.edit_message(
+            embed=self.parent_view.cog.panel_details(panel), view=self.parent_view
+        )
+
 
 class TicketManager(commands.Cog):
-    def __init__(self,bot,db,config):self.bot=bot;self.db=db;self.config=config
+    def __init__(self, bot: commands.Bot, db, config: dict):
+        self.bot = bot
+        self.db = db
+        self.config = config
+        self._create_locks: dict[tuple[int, int], asyncio.Lock] = {}
+
+    def _lock_for(self, guild_id: int, user_id: int) -> asyncio.Lock:
+        key = (guild_id, user_id)
+        lock = self._create_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._create_locks[key] = lock
+        return lock
+
     async def cog_load(self):
-        for p in await self.db.get_all_ticket_panels():
-            if p.get("message_id"):
-                try:self.bot.add_view(PanelView(self,p),message_id=p["message_id"])
-                except Exception as e:print(f"Ticket restore error: {e!r}")
-    async def staff(self,i):
-        return isinstance(i.user,discord.Member) and (i.user.guild_permissions.administrator or i.user.guild_permissions.manage_channels)
-    async def ticket(self,cid):return await self.db.fetchone("SELECT * FROM tickets WHERE channel_id=? AND status='open'",(cid,))
-    def panel_embed(self,p):
-        e=discord.Embed(title=str(p.get("title") or "🎫 الدعم الفني")[:256],description=str(p.get("description") or "اختار القسم المناسب لفتح تذكرة.")[:4096],color=EmbedColor.PRIMARY)
-        if p.get("image_url"):e.set_image(url=p["image_url"])
-        return e
-    def preview(self,s):
-        e=self.panel_embed(s);e.add_field(name="Mode",value="Select Menu" if s.get("mode")=="select" else "Buttons",inline=True);e.add_field(name="Types",value=str(len(s.get("options",[]))),inline=True);e.add_field(name="Category",value=f"<#{s['category_id']}>" if s.get("category_id") else "❌",inline=True);e.add_field(name="Channel",value=f"<#{s['channel_id']}>" if s.get("channel_id") else "❌",inline=True);return e
-    def panel_details(self,p):
-        e=self.panel_embed(p);e.add_field(name="Ticket Types",value="\n".join(f"{x.get('emoji','🎫')} {x.get('name','Ticket')}" for x in p.get('options',[])[:25]) or "None",inline=False);return e
-    async def create(self,i,pid,n):
-        p=await self.db.get_ticket_panel(pid);opts=p.get("options",[]) if p else []
-        if not p or p["guild_id"]!=i.guild.id or n>=len(opts):return await i.response.send_message("❌ Panel أو Ticket Type غير صالح.",ephemeral=True)
-        cat=i.guild.get_channel(p.get("category_id"))
-        if not isinstance(cat,discord.CategoryChannel):return await i.response.send_message("❌ Category ما بقاتش موجودة.",ephemeral=True)
-        old=await self.db.fetchone("SELECT channel_id FROM tickets WHERE guild_id=? AND user_id=? AND status='open'",(i.guild.id,i.user.id))
-        if old:return await i.response.send_message(f"❌ عندك Ticket مفتوحة بالفعل: <#{old[0]}>",ephemeral=True)
-        x=opts[n];name=clean(str(x.get("ticket_name") or "ticket-{user}").replace("{user}",i.user.name).replace("{id}",str(i.user.id)))
-        ow={i.guild.default_role:discord.PermissionOverwrite(view_channel=False),i.user:discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True)}
-        if i.guild.me:ow[i.guild.me]=discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True,manage_channels=True,manage_messages=True)
-        if p.get("support_role_id"):
-            r=i.guild.get_role(int(p["support_role_id"]));
-            if r:ow[r]=discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True)
-        await i.response.defer(ephemeral=True);ch=None
+        for panel in await self.db.get_all_ticket_panels():
+            if panel.get("message_id"):
+                try:
+                    self.bot.add_view(TicketPanelView(self, panel), message_id=int(panel["message_id"]))
+                except Exception as exc:
+                    print(f"[TicketPanel] restore error: {exc!r}")
+        for row in await self.db.fetchall("SELECT channel_id FROM tickets WHERE status='open' AND channel_id IS NOT NULL"):
+            try:
+                self.bot.add_view(TicketControls(self, int(row[0])), message_id=None)
+            except Exception:
+                pass
+
+    async def is_staff(self, interaction: discord.Interaction) -> bool:
+        member = interaction.user
+        return isinstance(member, discord.Member) and (
+            member.guild_permissions.administrator or member.guild_permissions.manage_channels
+        )
+
+    async def get_open_ticket(self, channel_id: int):
+        return await self.db.fetchone(
+            "SELECT * FROM tickets WHERE channel_id=? AND status='open' LIMIT 1", (channel_id,)
+        )
+
+    async def create_ticket_from_panel(self, interaction: discord.Interaction, panel_id: int, option_index: int):
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ التذاكر خدامة غير داخل السيرفر.", ephemeral=True)
+        panel = await self.db.get_ticket_panel(panel_id)
+        if not panel or int(panel["guild_id"]) != interaction.guild.id:
+            return await interaction.response.send_message("❌ Panel غير صالح.", ephemeral=True)
+        options = panel.get("options", [])
+        if option_index < 0 or option_index >= len(options):
+            return await interaction.response.send_message("❌ نوع التذكرة غير صالح.", ephemeral=True)
+        category = interaction.guild.get_channel(int(panel.get("category_id") or 0))
+        if not isinstance(category, discord.CategoryChannel):
+            return await interaction.response.send_message("❌ Category ديال التذاكر ما بقاتش موجودة.", ephemeral=True)
+        me = interaction.guild.me
+        if me is None or not category.permissions_for(me).manage_channels:
+            return await interaction.response.send_message("❌ البوت خاصو Manage Channels فـCategory ديال التذاكر.", ephemeral=True)
+
+        lock = self._lock_for(interaction.guild.id, interaction.user.id)
+        async with lock:
+            old = await self.db.fetchone(
+                "SELECT channel_id FROM tickets WHERE guild_id=? AND user_id=? AND status='open' LIMIT 1",
+                (interaction.guild.id, interaction.user.id),
+            )
+            if old:
+                return await interaction.response.send_message(
+                    f"❌ عندك Ticket مفتوحة بالفعل: <#{old['channel_id']}>", ephemeral=True
+                )
+            await interaction.response.defer(ephemeral=True)
+            channel = None
+            try:
+                item = options[option_index]
+                raw_name = str(item.get("ticket_name") or "ticket-{user}")
+                raw_name = raw_name.replace("{user}", interaction.user.name).replace("{id}", str(interaction.user.id))
+                name = clean_name(raw_name)
+                overwrites = {
+                    interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                    interaction.user: discord.PermissionOverwrite(
+                        view_channel=True, send_messages=True, read_message_history=True
+                    ),
+                }
+                if me:
+                    overwrites[me] = discord.PermissionOverwrite(
+                        view_channel=True, send_messages=True, read_message_history=True,
+                        manage_channels=True, manage_messages=True,
+                    )
+                if panel.get("support_role_id"):
+                    role = interaction.guild.get_role(int(panel["support_role_id"]))
+                    if role:
+                        overwrites[role] = discord.PermissionOverwrite(
+                            view_channel=True, send_messages=True, read_message_history=True
+                        )
+                channel = await category.create_text_channel(name=name, overwrites=overwrites, reason="Ader Ticket")
+                ticket_id = await self.db.create_ticket({
+                    "guild_id": interaction.guild.id, "user_id": interaction.user.id,
+                    "channel_id": channel.id, "status": "open",
+                })
+                embed = discord.Embed(
+                    title=f"🎫 {str(item.get('name') or 'Ticket')[:256]}",
+                    description=f"مرحبا {interaction.user.mention}!\n\n{item.get('description') or panel.get('ticket_description') or ''}",
+                    color=EmbedColor.PRIMARY,
+                )
+                image = valid_url(item.get("image_url"))
+                if image:
+                    embed.set_image(url=image)
+                await channel.send(content=interaction.user.mention, embed=embed,
+                                   view=TicketControls(self, channel.id))
+                self.bot.add_view(TicketControls(self, channel.id))
+                await interaction.followup.send(
+                    f"✅ تفتحات التذكرة: {channel.mention} (ID `{ticket_id}`)", ephemeral=True
+                )
+            except Exception as exc:
+                print(f"[Ticket] create error: {exc!r}")
+                if channel:
+                    try:
+                        await self.db.execute("UPDATE tickets SET status='deleted' WHERE channel_id=? AND status='open'", (channel.id,))
+                    except Exception:
+                        pass
+                    try:
+                        await channel.delete(reason="Ticket creation rollback")
+                    except discord.HTTPException:
+                        pass
+                await interaction.followup.send("❌ فشل إنشاء التذكرة. حاول مرة أخرى.", ephemeral=True)
+
+    async def close_ticket(self, interaction: discord.Interaction, channel_id: int):
+        ticket = await self.get_open_ticket(channel_id)
+        if not ticket:
+            return await interaction.response.send_message("❌ التذكرة غير موجودة أو تسدات.", ephemeral=True)
+        if interaction.user.id != int(ticket["user_id"]) and not await self.is_staff(interaction):
+            return await interaction.response.send_message("❌ غير صاحب التذكرة أو Staff يقدر يسدها.", ephemeral=True)
+        cur = await self.db.execute(
+            "UPDATE tickets SET status='closed', closed_at=? WHERE id=? AND status='open'",
+            (discord.utils.utcnow().timestamp(), ticket["id"]),
+        )
+        if cur.rowcount != 1:
+            return await interaction.response.send_message("❌ التذكرة تسدات من قبل.", ephemeral=True)
+        await interaction.response.send_message("🔒 تسدات التذكرة. غادي يتحيد الروم بعد 5 ثواني.")
+        await asyncio.sleep(5)
         try:
-            ch=await cat.create_text_channel(name,overwrites=ow,reason="Ader Ticket");tid=await self.db.create_ticket({"guild_id":i.guild.id,"user_id":i.user.id,"channel_id":ch.id,"status":"open"})
-            e=discord.Embed(title=f"🎫 {x.get('name','Ticket')}",description=f"مرحبا {i.user.mention}!\n\n{x.get('description') or p.get('ticket_description','')}",color=EmbedColor.PRIMARY)
-            if x.get("image_url"):e.set_image(url=x["image_url"])
-            await ch.send(content=i.user.mention,embed=e,view=TicketControls(self,ch.id));self.bot.add_view(TicketControls(self,ch.id));await i.followup.send(f"✅ تفتحات التذكرة: {ch.mention} (ID `{tid}`)",ephemeral=True)
-        except Exception as e:
-            print(f"Ticket create error: {e!r}")
-            if ch:
-                try:await ch.delete(reason="Ticket save failed")
-                except discord.HTTPException:pass
-            await i.followup.send("❌ فشل إنشاء التذكرة. تأكد من صلاحيات البوت.",ephemeral=True)
-    async def close(self,i,cid):
-        t=await self.ticket(cid)
-        if not t:return await i.response.send_message("❌ التذكرة غير موجودة.",ephemeral=True)
-        if i.user.id!=t["user_id"] and not await self.staff(i):return await i.response.send_message("❌ غير صاحب التذكرة أو Staff.",ephemeral=True)
-        r=await self.db.execute("UPDATE tickets SET status='closed',closed_at=? WHERE id=? AND status='open'",(discord.utils.utcnow().timestamp(),t["id"]))
-        if r.rowcount!=1:return await i.response.send_message("❌ تسدات من قبل.",ephemeral=True)
-        await i.response.send_message("🔒 تسدات التذكرة. غادي يتحيد الروم بعد 5 ثواني.");await asyncio.sleep(5)
-        try:await i.channel.delete(reason="Ader ticket close")
-        except discord.HTTPException:pass
-    @app_commands.command(name="ticket",description="Open Ader Ticket Tool manager")
+            await interaction.channel.delete(reason="Ader ticket close")
+        except discord.HTTPException:
+            pass
+
+    def panel_embed(self, panel: dict) -> discord.Embed:
+        embed = discord.Embed(
+            title=str(panel.get("title") or "🎫 الدعم الفني")[:256],
+            description=str(panel.get("description") or "اختار القسم المناسب لفتح تذكرة.")[:4096],
+            color=EmbedColor.PRIMARY,
+        )
+        image = valid_url(panel.get("image_url"))
+        if image:
+            embed.set_image(url=image)
+        return embed
+
+    def preview_embed(self, panel: dict) -> discord.Embed:
+        embed = self.panel_embed(panel)
+        embed.add_field(name="Mode", value="Select Menu" if panel.get("mode") == "select" else "Buttons", inline=True)
+        embed.add_field(name="Types", value=str(len(panel.get("options", []))), inline=True)
+        embed.add_field(name="Category", value=f"<#{panel['category_id']}>" if panel.get("category_id") else "❌", inline=True)
+        embed.add_field(name="Channel", value=f"<#{panel['channel_id']}>" if panel.get("channel_id") else "❌", inline=True)
+        return embed
+
+    def panel_details(self, panel: dict) -> discord.Embed:
+        embed = self.panel_embed(panel)
+        types = "\n".join(
+            f"{x.get('emoji', '🎫')} {x.get('name', 'Ticket')} → `{x.get('ticket_name', 'ticket-{user}')}`"
+            for x in panel.get("options", [])[:MAX_OPTIONS]
+        ) or "ما كاين حتى نوع."
+        embed.add_field(name="Ticket Types", value=types[:1024], inline=False)
+        return embed
+
+    def manage_embed(self, panels: list[dict]) -> discord.Embed:
+        lines = [f"`#{p['id']}` **{str(p.get('title') or 'Panel')[:80]}**" for p in panels[:MAX_OPTIONS]]
+        return discord.Embed(title="🎫 Manage Panels", description="\n".join(lines), color=EmbedColor.PRIMARY)
+
+    @app_commands.command(name="ticket", description="Open the Ader Ticket Tool manager")
     @is_admin()
-    async def ticket_cmd(self,i):await i.response.send_message(embed=discord.Embed(title="🎫 Ader Ticket Tool",description="**Create a Panel** لإنشاء Panel\n**Manage Panels** لإدارة Panels",color=EmbedColor.PRIMARY),view=Home(self),ephemeral=True)
-async def setup(bot):await bot.add_cog(TicketManager(bot,bot.db,bot.config))
+    async def ticket_cmd(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="🎫 Ader Ticket Tool",
+            description="استعمل **Create a Panel** لإنشاء Panel أو **Manage Panels** لتعديل/حذف Panels.",
+            color=EmbedColor.PRIMARY,
+        )
+        await interaction.response.send_message(embed=embed, view=TicketHomeView(self), ephemeral=True)
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(TicketManager(bot, bot.db, bot.config))
