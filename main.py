@@ -41,6 +41,7 @@ class Ader(commands.Bot):
         self.start_time = discord.utils.utcnow()
         self.logger = BotLogger(config.get("logging", {}))
         self.db = DatabaseManager(config.get("database", {}).get("sqlite_path", "data/ader.sqlite3"))
+        self._owner_give_lock = asyncio.Lock()
 
     async def setup_hook(self):
         await self.db.connect()
@@ -51,7 +52,8 @@ class Ader(commands.Bot):
         loaded = 0
         disabled = {
             "application_system.py", "application_system_v2.py", "application_system_v3.py",
-            "leveling.py", "tickets.py",
+            "leveling.py", "tickets.py", "tournament_delete.py",
+            # AdvancedTournament is the single owner of tournament-delete/settings/view UI.
         }
         for path in sorted(directory.glob("*.py")):
             if path.stem.startswith("_") or path.stem == "__init__" or path.name in disabled:
@@ -87,13 +89,19 @@ class Ader(commands.Bot):
                 return
             if ctx.guild is None or member is None or amount is None or amount <= 0 or member.bot:
                 return await ctx.send("❌ الاستعمال: `!اعطي @user المبلغ`", delete_after=6)
-            key = f"owner-give:{ctx.message.id}"
-            cur = await self.db.execute("INSERT OR IGNORE INTO processed_commands(command_key,created_at) VALUES(?,?)", (key, time.time()))
-            if cur.rowcount != 1:
-                return await ctx.send("⚠️ هاد الأمر راه تعالج من قبل.", delete_after=6)
-            if not await self.db.add_balance(member.id, ctx.guild.id, amount):
-                return await ctx.send("❌ تعذر إضافة العملة.", delete_after=6)
-            balance = await self.db.get_balance(member.id)
+            # One lock + one persistent idempotency key means the same Discord
+            # message can never grant the amount twice, even if two handlers race.
+            async with self._owner_give_lock:
+                key = f"owner-give:{ctx.message.id}"
+                cur = await self.db.execute(
+                    "INSERT OR IGNORE INTO processed_commands(command_key,created_at) VALUES(?,?)",
+                    (key, time.time()),
+                )
+                if cur.rowcount != 1:
+                    return await ctx.send("⚠️ هاد الأمر راه تعالج من قبل.", delete_after=6)
+                if not await self.db.add_balance(member.id, ctx.guild.id, amount):
+                    return await ctx.send("❌ تعذر إضافة العملة.", delete_after=6)
+                balance = await self.db.get_balance(member.id)
             await ctx.send(f"🪙 تم إعطاء {member.mention} **{amount:,} ANOCoin**. الرصيد الجديد: **{balance:,} ANOCoin**.")
 
     async def on_ready(self):
@@ -123,29 +131,18 @@ class Ader(commands.Bot):
 
 
 def _get_discord_token(config: dict) -> str:
-    """Resolve the bot token from environment/config without ever logging it."""
-    # Quaxly/FeatherPanel should use DISCORD_BOT_TOKEN. Keep DISCORD_TOKEN
-    # as a backwards-compatible alias for existing installations.
     token = os.getenv("DISCORD_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
-
-    # config.yaml historically contains the literal placeholder
-    # ${DISCORD_BOT_TOKEN}; do not pass that placeholder to Discord.
     if not token:
         configured = str(config.get("bot", {}).get("token", "") or "").strip()
         if configured.startswith("${") and configured.endswith("}"):
-            env_name = configured[2:-1].strip()
-            token = os.getenv(env_name, "")
+            token = os.getenv(configured[2:-1].strip(), "")
         else:
             token = configured
-
     token = (token or "").strip()
     if token.lower().startswith("bot "):
         token = token[4:].strip()
-
     if not token or token.startswith("${"):
-        raise RuntimeError(
-            "Discord bot token is not configured. Set DISCORD_BOT_TOKEN in the hosting panel."
-        )
+        raise RuntimeError("Discord bot token is not configured. Set DISCORD_BOT_TOKEN in the hosting panel.")
     return token
 
 
