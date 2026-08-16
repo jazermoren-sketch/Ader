@@ -114,7 +114,6 @@ class DatabaseManager:
         );
         """)
 
-        # Backward-compatible migration for existing Ader databases.
         columns = await self.fetchall("PRAGMA table_info(users)")
         names = {row[1] for row in columns}
         if "last_daily" not in names:
@@ -303,6 +302,16 @@ class DatabaseManager:
             result.append(data)
         return result
 
+    async def get_all_ticket_panels(self) -> List[Dict[str, Any]]:
+        """Return every saved panel so persistent ticket views can be restored on startup."""
+        rows = await self.fetchall("SELECT * FROM ticket_panels ORDER BY id DESC")
+        result = []
+        for row in rows:
+            data = dict(row)
+            data['options'] = json.loads(data.get('options') or '[]')
+            result.append(data)
+        return result
+
     async def update_ticket_panel(self, panel_id: int, data: Dict[str, Any]) -> bool:
         allowed = {'guild_id', 'channel_id', 'message_id', 'title', 'description', 'image_url', 'mode', 'button_label', 'button_emoji', 'category_id', 'support_role_id', 'ticket_description', 'options'}
         sets, vals = [], []
@@ -321,6 +330,39 @@ class DatabaseManager:
 
     async def delete_ticket_panel(self, panel_id: int) -> bool:
         cur = await self.execute("DELETE FROM ticket_panels WHERE id=?", (panel_id,))
+        return cur.rowcount > 0
+
+    async def create_reminder(self, data: Dict[str, Any]) -> str:
+        """Create a reminder using the legacy reminders table expected by Utility."""
+        payload = dict(data)
+        payload['message'] = str(data.get('message', ''))
+        cur = await self.execute(
+            "INSERT INTO reminders(user_id,guild_id,channel_id,remind_at,completed,data) VALUES(?,?,?,?,0,?)",
+            (data.get('user_id'), data.get('guild_id'), data.get('channel_id'), float(data['remind_at']), json.dumps(payload, ensure_ascii=False)),
+        )
+        return str(cur.lastrowid)
+
+    async def get_due_reminders(self, current_time: float) -> List[Dict[str, Any]]:
+        """Return pending reminders whose due time has passed."""
+        rows = await self.fetchall(
+            "SELECT id AS _id, user_id, guild_id, channel_id, remind_at, completed, data FROM reminders WHERE completed=0 AND remind_at<=? ORDER BY remind_at ASC",
+            (current_time,),
+        )
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                payload = json.loads(item.pop('data') or '{}')
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+            item.update(payload)
+            item['_id'] = int(row['_id'])
+            item['message'] = str(item.get('message', payload.get('text', 'Reminder')))
+            result.append(item)
+        return result
+
+    async def complete_reminder(self, reminder_id: str) -> bool:
+        cur = await self.execute("UPDATE reminders SET completed=1 WHERE id=?", (int(reminder_id),))
         return cur.rowcount > 0
 
     async def get_shop_items(self, guild_id: int) -> List[Dict[str, Any]]:
