@@ -122,6 +122,33 @@ class Ader(commands.Bot):
             await super().close()
 
 
+def _get_discord_token(config: dict) -> str:
+    """Resolve the bot token from environment/config without ever logging it."""
+    # Quaxly/FeatherPanel should use DISCORD_BOT_TOKEN. Keep DISCORD_TOKEN
+    # as a backwards-compatible alias for existing installations.
+    token = os.getenv("DISCORD_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
+
+    # config.yaml historically contains the literal placeholder
+    # ${DISCORD_BOT_TOKEN}; do not pass that placeholder to Discord.
+    if not token:
+        configured = str(config.get("bot", {}).get("token", "") or "").strip()
+        if configured.startswith("${") and configured.endswith("}"):
+            env_name = configured[2:-1].strip()
+            token = os.getenv(env_name, "")
+        else:
+            token = configured
+
+    token = (token or "").strip()
+    if token.lower().startswith("bot "):
+        token = token[4:].strip()
+
+    if not token or token.startswith("${"):
+        raise RuntimeError(
+            "Discord bot token is not configured. Set DISCORD_BOT_TOKEN in the hosting panel."
+        )
+    return token
+
+
 def load_config():
     with open("config.yaml", "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -129,9 +156,7 @@ def load_config():
 
 async def main():
     config = load_config()
-    token = os.getenv("DISCORD_TOKEN") or config.get("bot", {}).get("token")
-    if not token:
-        raise RuntimeError("DISCORD_TOKEN is not configured")
+    token = _get_discord_token(config)
     await Ader(config).start(token)
 
 
