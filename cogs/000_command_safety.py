@@ -1,10 +1,7 @@
-"""Global Discord interaction safety and duplicate-command protection.
-
-Loaded first so command registration and UI failures cannot leave the bot with
-partially loaded moderation systems or unanswered interactions.
-"""
+"""Global command/UI safety, schema repair and legacy cleanup."""
 from __future__ import annotations
 
+import time
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -25,7 +22,7 @@ async def _view_error(view, interaction: discord.Interaction, error: Exception, 
 async def _modal_error(modal, interaction: discord.Interaction, error: Exception):
     print(f"Modal error [{type(modal).__name__}]: {error!r}")
     try:
-        text = "❌ وقع خطأ أثناء حفظ البيانات. حاول مرة أخرى."
+        text = "❌ وقع خطأ أثناء حفظ البيانات. تم تسجيل الخطأ في Log البوت."
         if interaction.response.is_done():
             await interaction.followup.send(text, ephemeral=True)
         else:
@@ -37,38 +34,64 @@ async def _modal_error(modal, interaction: discord.Interaction, error: Exception
 class CommandSafety(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._original_add = bot.tree.add_command
         self._installed = False
 
     async def cog_load(self):
-        if not self._installed:
-            original = self._original_add
+        if self._installed:
+            return
+        original = self.bot.tree.add_command
 
-            def safe_add(command, *, guild=None, guilds=None, override=False):
-                # Discord only permits one command with a given name/scope.
-                # Replacing a stale/legacy registration is preferable to aborting
-                # the whole cog and losing all its other commands.
-                try:
-                    return original(command, guild=guild, guilds=guilds, override=override)
-                except app_commands.CommandAlreadyRegistered:
-                    return original(command, guild=guild, guilds=guilds, override=True)
+        def safe_add(command, *, guild=None, guilds=None, override=False):
+            try:
+                return original(command, guild=guild, guilds=guilds, override=override)
+            except app_commands.CommandAlreadyRegistered:
+                return original(command, guild=guild, guilds=guilds, override=True)
 
-            self.bot.tree.add_command = safe_add
-            discord.ui.View.on_error = _view_error
-            discord.ui.Modal.on_error = _modal_error
-            self._installed = True
+        self.bot.tree.add_command = safe_add
+        discord.ui.View.on_error = _view_error
+        discord.ui.Modal.on_error = _modal_error
+        self.bot.tree.on_error = self._tree_error
+        await self._repair_schema()
+        self._installed = True
 
-            async def tree_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-                print(f"Application command error: {getattr(error, 'original', error)!r}")
-                try:
-                    if interaction.response.is_done():
-                        await interaction.followup.send("❌ وقع خطأ أثناء تنفيذ الأمر. حاول مرة أخرى.", ephemeral=True)
-                    else:
-                        await interaction.response.send_message("❌ وقع خطأ أثناء تنفيذ الأمر. حاول مرة أخرى.", ephemeral=True)
-                except Exception:
-                    pass
+    async def _tree_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        print(f"Application command error: {getattr(error, 'original', error)!r}")
+        try:
+            text = "❌ وقع خطأ أثناء تنفيذ الأمر. حاول مرة أخرى."
+            if interaction.response.is_done():
+                await interaction.followup.send(text, ephemeral=True)
+            else:
+                await interaction.response.send_message(text, ephemeral=True)
+        except Exception:
+            pass
 
-            self.bot.tree.on_error = tree_error
+    async def _repair_schema(self):
+        """Repair older SQLite installations created before newer columns existed."""
+        db = self.bot.db
+        await db.execute("CREATE TABLE IF NOT EXISTS processed_commands (command_key TEXT PRIMARY KEY, created_at REAL NOT NULL)")
+        rows = await db.fetchall("PRAGMA table_info(ticket_panels)")
+        existing = {row[1] for row in rows}
+        columns = {
+            "channel_id": "INTEGER",
+            "message_id": "INTEGER",
+            "title": "TEXT NOT NULL DEFAULT '🎫 الدعم الفني'",
+            "description": "TEXT NOT NULL DEFAULT 'اختار القسم المناسب لفتح تذكرة.'",
+            "image_url": "TEXT",
+            "mode": "TEXT NOT NULL DEFAULT 'buttons'",
+            "button_label": "TEXT NOT NULL DEFAULT 'فتح تذكرة'",
+            "button_emoji": "TEXT NOT NULL DEFAULT '🎫'",
+            "category_id": "INTEGER",
+            "support_role_id": "INTEGER",
+            "ticket_description": "TEXT NOT NULL DEFAULT 'شرح لينا المشكل ديالك بالتفصيل.'",
+            "options": "TEXT NOT NULL DEFAULT '[]'",
+            "created_at": "REAL NOT NULL DEFAULT 0",
+        }
+        for name, definition in columns.items():
+            if name not in existing:
+                await db.execute(f"ALTER TABLE ticket_panels ADD COLUMN {name} {definition}")
+
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ticket_open_user ON tickets(guild_id, user_id, status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ticket_panels_guild ON ticket_panels(guild_id)")
 
 
 async def setup(bot: commands.Bot):
