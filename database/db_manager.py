@@ -40,8 +40,7 @@ class DatabaseManager:
             user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL,
             xp INTEGER NOT NULL DEFAULT 0, level INTEGER NOT NULL DEFAULT 0,
             balance INTEGER NOT NULL DEFAULT 0, inventory TEXT NOT NULL DEFAULT '[]',
-            warnings TEXT NOT NULL DEFAULT '[]', created_at REAL NOT NULL,
-            PRIMARY KEY(user_id, guild_id)
+            warnings TEXT NOT NULL DEFAULT '[]', created_at REAL NOT NULL
         );
         CREATE TABLE IF NOT EXISTS global_balances (
             user_id INTEGER PRIMARY KEY,
@@ -114,6 +113,13 @@ class DatabaseManager:
             PRIMARY KEY(guild_id, user_id, action)
         );
         """)
+
+        # Backward-compatible migration for existing Ader databases.
+        columns = await self.fetchall("PRAGMA table_info(users)")
+        names = {row[1] for row in columns}
+        if "last_daily" not in names:
+            await self.connection.execute("ALTER TABLE users ADD COLUMN last_daily REAL NOT NULL DEFAULT 0")
+
         await self.connection.execute(
             """INSERT OR IGNORE INTO global_balances(user_id, balance, created_at)
                SELECT user_id, 0, MIN(created_at) FROM users GROUP BY user_id"""
@@ -145,8 +151,10 @@ class DatabaseManager:
 
     async def create_user(self, user_id: int, guild_id: int, data: Dict[str, Any] = None) -> Dict[str, Any]:
         data = data or {}
-        await self.execute("INSERT OR IGNORE INTO users(user_id,guild_id,xp,level,balance,inventory,warnings,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                           (user_id,guild_id,data.get('xp',0),data.get('level',0),0,json.dumps(data.get('inventory',[])),json.dumps(data.get('warnings',[])),time.time()))
+        await self.execute(
+            "INSERT OR IGNORE INTO users(user_id,guild_id,xp,level,balance,inventory,warnings,created_at,last_daily) VALUES(?,?,?,?,?,?,?,?,?)",
+            (user_id, guild_id, data.get('xp', 0), data.get('level', 0), 0, json.dumps(data.get('inventory', [])), json.dumps(data.get('warnings', [])), time.time(), data.get('last_daily', 0)),
+        )
         await self.execute("INSERT OR IGNORE INTO global_balances(user_id,balance,created_at) VALUES(?,?,?)", (user_id, 0, time.time()))
         return await self.get_user(user_id, guild_id)
 
@@ -167,85 +175,114 @@ class DatabaseManager:
         return cur.rowcount > 0
 
     async def update_user(self, user_id: int, guild_id: int, data: Dict[str, Any]) -> bool:
-        if not data: return False
+        if not data:
+            return False
         if 'balance' in data:
             await self.set_global_balance(user_id, int(data['balance']))
             data = {k: v for k, v in data.items() if k != 'balance'}
-        if not data: return True
-        sets=[]; vals=[]
-        for key,value in data.items():
-            if key in ('inventory','warnings'): value=json.dumps(value)
-            if key not in {'xp','level','inventory','warnings'}: continue
-            sets.append(f"{key}=?"); vals.append(value)
-        if not sets: return False
-        vals += [user_id,guild_id]
+        if not data:
+            return True
+        sets, vals = [], []
+        for key, value in data.items():
+            if key in ('inventory', 'warnings'):
+                value = json.dumps(value)
+            if key not in {'xp', 'level', 'inventory', 'warnings', 'last_daily'}:
+                continue
+            sets.append(f"{key}=?")
+            vals.append(value)
+        if not sets:
+            return False
+        vals += [user_id, guild_id]
         cur = await self.execute(f"UPDATE users SET {', '.join(sets)} WHERE user_id=? AND guild_id=?", tuple(vals))
         return cur.rowcount > 0
 
     async def increment_user_field(self, user_id: int, guild_id: int, field: str, amount: int = 1) -> bool:
-        if field not in {'xp','level'}: return False
-        await self.create_user(user_id,guild_id)
-        cur = await self.execute(f"UPDATE users SET {field}={field}+? WHERE user_id=? AND guild_id=?", (amount,user_id,guild_id))
+        if field not in {'xp', 'level'}:
+            return False
+        await self.create_user(user_id, guild_id)
+        cur = await self.execute(f"UPDATE users SET {field}={field}+? WHERE user_id=? AND guild_id=?", (amount, user_id, guild_id))
         return cur.rowcount > 0
 
     async def get_guild(self, guild_id: int) -> Optional[Dict[str, Any]]:
-        row=await self.fetchone("SELECT * FROM guilds WHERE guild_id=?",(guild_id,))
-        if not row: return None
-        d=dict(row); d['modules']=json.loads(d.pop('config','{}') or '{}'); return d
+        row = await self.fetchone("SELECT * FROM guilds WHERE guild_id=?", (guild_id,))
+        if not row:
+            return None
+        d = dict(row)
+        d['modules'] = json.loads(d.pop('config', '{}') or '{}')
+        return d
 
     async def create_guild(self, guild_id: int, data: Dict[str, Any] = None) -> Dict[str, Any]:
-        await self.execute("INSERT OR IGNORE INTO guilds(guild_id,config,created_at) VALUES(?,?,?)",(guild_id,json.dumps(data or {}),time.time()))
+        await self.execute("INSERT OR IGNORE INTO guilds(guild_id,config,created_at) VALUES(?,?,?)", (guild_id, json.dumps(data or {}), time.time()))
         return await self.get_guild(guild_id)
 
     async def update_guild(self, guild_id: int, data: Dict[str, Any]) -> bool:
         await self.create_guild(guild_id)
-        current=await self.get_guild(guild_id); cfg=current.get('modules',{}) if current else {}
+        current = await self.get_guild(guild_id)
+        cfg = current.get('modules', {}) if current else {}
         cfg.update(data)
-        cur=await self.execute("UPDATE guilds SET config=? WHERE guild_id=?",(json.dumps(cfg),guild_id)); return cur.rowcount>0
+        cur = await self.execute("UPDATE guilds SET config=? WHERE guild_id=?", (json.dumps(cfg), guild_id))
+        return cur.rowcount > 0
 
-    async def get_leaderboard(self,guild_id:int,limit:int=10)->List[Dict[str,Any]]:
-        rows=await self.fetchall("SELECT * FROM users WHERE guild_id=? ORDER BY xp DESC LIMIT ?",(guild_id,limit)); return [dict(r) for r in rows]
+    async def get_leaderboard(self, guild_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+        rows = await self.fetchall("SELECT * FROM users WHERE guild_id=? ORDER BY xp DESC LIMIT ?", (guild_id, limit))
+        return [dict(r) for r in rows]
 
-    async def add_balance(self,user_id:int,guild_id:int,amount:int)->bool:
-        await self.create_user(user_id,guild_id)
+    async def add_balance(self, user_id: int, guild_id: int, amount: int) -> bool:
+        await self.create_user(user_id, guild_id)
         return await self.update_global_balance(user_id, amount)
 
-    async def remove_balance(self,user_id:int,guild_id:int,amount:int)->bool:
+    async def remove_balance(self, user_id: int, guild_id: int, amount: int) -> bool:
         balance = await self.get_balance(user_id)
         if balance < amount:
             return False
         return await self.update_global_balance(user_id, -amount)
 
-    async def add_item(self,user_id:int,guild_id:int,item:Dict[str,Any])->bool:
-        u=await self.create_user(user_id,guild_id); inv=u['inventory']; inv.append(item); return await self.update_user(user_id,guild_id,{'inventory':inv})
+    async def add_item(self, user_id: int, guild_id: int, item: Dict[str, Any]) -> bool:
+        u = await self.create_user(user_id, guild_id)
+        inv = u['inventory']
+        inv.append(item)
+        return await self.update_user(user_id, guild_id, {'inventory': inv})
 
-    async def add_warning(self,user_id:int,guild_id:int,warning:Dict[str,Any])->bool:
-        u=await self.create_user(user_id,guild_id); warnings=u['warnings']; warnings.append(warning); await self.update_user(user_id,guild_id,{'warnings':warnings})
-        await self.execute("INSERT INTO warnings(guild_id,user_id,moderator_id,reason,created_at) VALUES(?,?,?,?,?)",(guild_id,user_id,warning.get('moderator_id',0),warning.get('reason',''),time.time())); return True
+    async def add_warning(self, user_id: int, guild_id: int, warning: Dict[str, Any]) -> bool:
+        u = await self.create_user(user_id, guild_id)
+        warnings = u['warnings']
+        warnings.append(warning)
+        await self.update_user(user_id, guild_id, {'warnings': warnings})
+        await self.execute("INSERT INTO warnings(guild_id,user_id,moderator_id,reason,created_at) VALUES(?,?,?,?,?)", (guild_id, user_id, warning.get('moderator_id', 0), warning.get('reason', ''), time.time()))
+        return True
 
-    async def get_warnings(self,user_id:int,guild_id:int)->List[Dict[str,Any]]:
-        rows=await self.fetchall("SELECT * FROM warnings WHERE user_id=? AND guild_id=? AND active=1 ORDER BY id DESC",(user_id,guild_id)); return [dict(r) for r in rows]
+    async def get_warnings(self, user_id: int, guild_id: int) -> List[Dict[str, Any]]:
+        rows = await self.fetchall("SELECT * FROM warnings WHERE user_id=? AND guild_id=? AND active=1 ORDER BY id DESC", (user_id, guild_id))
+        return [dict(r) for r in rows]
 
-    async def create_ticket(self,ticket_data:Dict[str,Any])->str:
-        cur=await self.execute("INSERT INTO tickets(guild_id,channel_id,user_id,status,claimed_by,created_at,data) VALUES(?,?,?,?,?,?,?)",(ticket_data.get('guild_id'),ticket_data.get('channel_id'),ticket_data.get('user_id'),ticket_data.get('status','open'),ticket_data.get('claimed_by'),time.time(),json.dumps(ticket_data))); return str(cur.lastrowid)
+    async def create_ticket(self, ticket_data: Dict[str, Any]) -> str:
+        cur = await self.execute("INSERT INTO tickets(guild_id,channel_id,user_id,status,claimed_by,created_at,data) VALUES(?,?,?,?,?,?,?)", (ticket_data.get('guild_id'), ticket_data.get('channel_id'), ticket_data.get('user_id'), ticket_data.get('status', 'open'), ticket_data.get('claimed_by'), time.time(), json.dumps(ticket_data)))
+        return str(cur.lastrowid)
 
-    async def get_ticket(self,ticket_id:str)->Optional[Dict[str,Any]]:
-        r=await self.fetchone("SELECT * FROM tickets WHERE id=?",(int(ticket_id),)); return dict(r) if r else None
+    async def get_ticket(self, ticket_id: str) -> Optional[Dict[str, Any]]:
+        r = await self.fetchone("SELECT * FROM tickets WHERE id=?", (int(ticket_id),))
+        return dict(r) if r else None
 
-    async def update_ticket(self,ticket_id:str,data:Dict[str,Any])->bool:
-        if not data:return False
-        sets=[];vals=[]
-        for k,v in data.items():
-            if k in {'status','claimed_by','channel_id','user_id','closed_at'}:sets.append(f'{k}=?');vals.append(v)
-        if not sets:return False
-        vals.append(int(ticket_id)); cur=await self.execute(f"UPDATE tickets SET {','.join(sets)} WHERE id=?",tuple(vals));return cur.rowcount>0
+    async def update_ticket(self, ticket_id: str, data: Dict[str, Any]) -> bool:
+        if not data:
+            return False
+        sets, vals = [], []
+        for k, v in data.items():
+            if k in {'status', 'claimed_by', 'channel_id', 'user_id', 'closed_at'}:
+                sets.append(f'{k}=?')
+                vals.append(v)
+        if not sets:
+            return False
+        vals.append(int(ticket_id))
+        cur = await self.execute(f"UPDATE tickets SET {','.join(sets)} WHERE id=?", tuple(vals))
+        return cur.rowcount > 0
 
     async def create_ticket_panel(self, data: Dict[str, Any]) -> int:
         options = json.dumps(data.get('options', []), ensure_ascii=False)
         cur = await self.execute(
             """INSERT INTO ticket_panels(guild_id,channel_id,message_id,title,description,image_url,mode,button_label,button_emoji,category_id,support_role_id,ticket_description,options,created_at)
                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (data['guild_id'], data.get('channel_id'), data.get('message_id'), data.get('title','🎫 الدعم الفني'), data.get('description','اختار القسم المناسب لفتح تذكرة.'), data.get('image_url'), data.get('mode','buttons'), data.get('button_label','فتح تذكرة'), data.get('button_emoji','🎫'), data.get('category_id'), data.get('support_role_id'), data.get('ticket_description','شرح لينا المشكل ديالك بالتفصيل.'), options, time.time())
+            (data['guild_id'], data.get('channel_id'), data.get('message_id'), data.get('title', '🎫 الدعم الفني'), data.get('description', 'اختار القسم المناسب لفتح تذكرة.'), data.get('image_url'), data.get('mode', 'buttons'), data.get('button_label', 'فتح تذكرة'), data.get('button_emoji', '🎫'), data.get('category_id'), data.get('support_role_id'), data.get('ticket_description', 'شرح لينا المشكل ديالك بالتفصيل.'), options, time.time())
         )
         return int(cur.lastrowid)
 
@@ -267,14 +304,15 @@ class DatabaseManager:
         return result
 
     async def update_ticket_panel(self, panel_id: int, data: Dict[str, Any]) -> bool:
-        allowed = {'channel_id','message_id','title','description','image_url','mode','button_label','button_emoji','category_id','support_role_id','ticket_description','options'}
-        sets=[]; vals=[]
+        allowed = {'guild_id', 'channel_id', 'message_id', 'title', 'description', 'image_url', 'mode', 'button_label', 'button_emoji', 'category_id', 'support_role_id', 'ticket_description', 'options'}
+        sets, vals = [], []
         for key, value in data.items():
             if key not in allowed:
                 continue
             if key == 'options':
                 value = json.dumps(value, ensure_ascii=False)
-            sets.append(f"{key}=?"); vals.append(value)
+            sets.append(f"{key}=?")
+            vals.append(value)
         if not sets:
             return False
         vals.append(panel_id)
@@ -285,34 +323,6 @@ class DatabaseManager:
         cur = await self.execute("DELETE FROM ticket_panels WHERE id=?", (panel_id,))
         return cur.rowcount > 0
 
-    async def get_all_ticket_panels(self) -> List[Dict[str, Any]]:
-        rows = await self.fetchall("SELECT * FROM ticket_panels ORDER BY id")
-        result=[]
-        for row in rows:
-            data=dict(row); data['options']=json.loads(data.get('options') or '[]'); result.append(data)
-        return result
-
-    async def log_event(self,event_type:str,data:Dict[str,Any])->None:
-        await self.execute("INSERT INTO analytics(guild_id,type,timestamp,data) VALUES(?,?,?,?)",(data.get('guild_id'),event_type,time.time(),json.dumps(data)))
-
-    async def get_analytics(self,guild_id:int,event_type:Optional[str]=None,start_time:Optional[float]=None,end_time:Optional[float]=None)->List[Dict[str,Any]]:
-        q='SELECT * FROM analytics WHERE guild_id=?';p=[guild_id]
-        if event_type:q+=' AND type=?';p.append(event_type)
-        if start_time:q+=' AND timestamp>=?';p.append(start_time)
-        if end_time:q+=' AND timestamp<=?';p.append(end_time)
-        q+=' ORDER BY timestamp DESC LIMIT 1000'; rows=await self.fetchall(q,tuple(p)); return [dict(r) for r in rows]
-
-    async def create_reminder(self,reminder_data:Dict[str,Any])->str:
-        cur=await self.execute("INSERT INTO reminders(user_id,guild_id,channel_id,remind_at,completed,data) VALUES(?,?,?,?,0,?)",(reminder_data.get('user_id'),reminder_data.get('guild_id'),reminder_data.get('channel_id'),reminder_data.get('remind_at'),json.dumps(reminder_data)));return str(cur.lastrowid)
-
-    async def get_due_reminders(self,current_time:float)->List[Dict[str,Any]]:
-        rows=await self.fetchall("SELECT * FROM reminders WHERE remind_at<=? AND completed=0",(current_time,));return [dict(r) for r in rows]
-
-    async def complete_reminder(self,reminder_id:str)->bool:
-        cur=await self.execute("UPDATE reminders SET completed=1 WHERE id=?",(int(reminder_id),));return cur.rowcount>0
-
-    async def get_shop_items(self,guild_id:int)->List[Dict[str,Any]]:
-        rows=await self.fetchall("SELECT * FROM shop WHERE guild_id=?",(guild_id,));return [dict(r) for r in rows]
-
-    async def create_shop_item(self,item_data:Dict[str,Any])->str:
-        cur=await self.execute("INSERT INTO shop(guild_id,name,price,data) VALUES(?,?,?,?)",(item_data['guild_id'],item_data['name'],item_data['price'],json.dumps(item_data)));return str(cur.lastrowid)
+    async def get_shop_items(self, guild_id: int) -> List[Dict[str, Any]]:
+        rows = await self.fetchall("SELECT * FROM shop WHERE guild_id=? ORDER BY id ASC", (guild_id,))
+        return [dict(r) for r in rows]
