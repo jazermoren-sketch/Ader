@@ -1,7 +1,11 @@
 # Ader Ultimate configuration
 bot:
   token: "${DISCORD_BOT_TOKEN}"
-  prefix: "/"
+  # Prefix commands can be invoked with A (for example: A @user or A @user 500)
+  # Keep / as a compatibility prefix for existing text commands.
+  prefix:
+    - "A"
+    - "/"
   status: "online"
   activity: "Managing your community"
   activity_type: "watching"
