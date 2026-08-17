@@ -49,11 +49,8 @@ class Ader(commands.Bot):
         else:
             prefixes = ["!"]
 
-        # ! is always available because the official owner command is !اعطي.
         if "!" not in prefixes:
             prefixes.append("!")
-
-        # Remove duplicates while preserving order.
         prefixes = list(dict.fromkeys(prefixes))
 
         super().__init__(command_prefix=prefixes, intents=intents, help_command=None)
@@ -110,6 +107,13 @@ class Ader(commands.Bot):
             if path.stem.startswith("_") or path.stem == "__init__" or path.name in disabled:
                 continue
             try:
+                # !اعطي has one canonical implementation. Older cogs may have
+                # registered a legacy command with the same name; remove that
+                # registration immediately before loading the official cog.
+                if path.stem == "official_shortcuts":
+                    legacy = self.get_command("اعطي")
+                    if legacy is not None:
+                        self.remove_command(legacy.name)
                 if path.stem == "application_system_v4":
                     self.tree.remove_command("تقديم")
                 elif path.stem == "ultimate_system":
