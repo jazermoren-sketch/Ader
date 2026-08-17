@@ -50,6 +50,7 @@ modules:
 
 web:
   enabled: true
+  name: "nova.aro"
   host: "0.0.0.0"
   port: 8000
-  cors_origins: ["*"]
+  cors_origins: ["http://localhost:8000"]
