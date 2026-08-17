@@ -18,7 +18,7 @@ class WebDashboard(commands.Cog):
             return
         try:
             import uvicorn
-            from web.api import create_app
+            from web.api_v2 import create_app
         except Exception as exc:
             self.bot.logger.error(f"Dashboard dependencies are unavailable: {exc}")
             return
