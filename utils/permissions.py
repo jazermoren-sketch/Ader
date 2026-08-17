@@ -1,5 +1,10 @@
 """
-Permission checks and utilities for Logiq
+Permission checks and utilities for Logiq.
+
+Moderation slash commands are intentionally mapped to their minimum Discord
+permission.  Administrator inherits every Discord permission, so admins still
+pass every moderation check without making Administrator the requirement for
+all moderation actions.
 """
 
 import discord
@@ -14,27 +19,28 @@ def is_admin():
     return app_commands.check(predicate)
 
 
+_MODERATION_PERMISSIONS = {
+    "warn": "manage_messages",
+    "warnings": "manage_messages",
+    "timeout": "moderate_members",
+    "kick": "kick_members",
+    "ban": "ban_members",
+    "unban": "ban_members",
+    "clear": "manage_messages",
+    "slowmode": "manage_channels",
+    "lock": "manage_channels",
+    "unlock": "manage_channels",
+    "nickname": "manage_nicknames",
+}
+
+
 def is_moderator():
-    """Check the minimum Discord permission required by each moderation command.
+    """Require the minimum Discord permission for each moderation command.
 
-    Administrator always passes. Other moderation commands use their actual
-    Discord permission instead of granting every moderation action to anyone
-    who has one unrelated moderation permission.
+    The decorator also sets Discord's native ``default_permissions`` metadata,
+    so the slash-command UI reflects the same permission requirement instead
+    of merely rejecting the command after a user invokes it.
     """
-    command_permissions = {
-        "warn": "manage_messages",
-        "warnings": "manage_messages",
-        "timeout": "moderate_members",
-        "kick": "kick_members",
-        "ban": "ban_members",
-        "unban": "ban_members",
-        "clear": "manage_messages",
-        "slowmode": "manage_channels",
-        "lock": "manage_channels",
-        "unlock": "manage_channels",
-        "nickname": "manage_nicknames",
-    }
-
     async def predicate(interaction: discord.Interaction) -> bool:
         if not interaction.guild:
             return False
@@ -45,14 +51,25 @@ def is_moderator():
 
         command = getattr(interaction, "command", None)
         command_name = getattr(command, "name", None)
-        required = command_permissions.get(command_name)
+        required = _MODERATION_PERMISSIONS.get(command_name)
         if required is None:
-            # Safe default for future moderation commands: do not grant access
-            # unless the caller is an Administrator.
             return False
         return bool(getattr(perms, required, False))
 
-    return app_commands.check(predicate)
+    def decorator(command):
+        command_name = getattr(command, "name", None) or getattr(command, "__name__", "")
+        required = _MODERATION_PERMISSIONS.get(command_name)
+
+        if required:
+            command = app_commands.default_permissions(**{required: True})(command)
+        else:
+            # Never accidentally expose a future moderation command without a
+            # known permission.  The runtime predicate remains fail-closed too.
+            command = app_commands.default_permissions(administrator=True)(command)
+
+        return app_commands.check(predicate)(command)
+
+    return decorator
 
 
 def has_role(role_id: int):
