@@ -15,12 +15,9 @@ from utils.logger import BotLogger
 load_dotenv()
 discord.timedelta = timedelta
 
-# Linux/Termux/Quaxly all support flock. The lock is process-owned and is
-# automatically released by the OS if the process crashes, preventing multiple
-# local Ader processes from connecting with the same Discord token.
 try:
     import fcntl
-except ImportError:  # pragma: no cover - Windows fallback
+except ImportError:
     fcntl = None
 
 _original_context_send = commands.Context.send
@@ -44,11 +41,20 @@ class Ader(commands.Bot):
         intents.members = True
         intents.presences = True
 
-        configured_prefix = config.get("bot", {}).get("prefix", "/")
-        # Keep the configured prefix and explicitly support ! for the official
-        # !اعطي command. Prefix commands are routed by discord.py, not by a
-        # second on_message handler.
-        prefixes = [configured_prefix] if configured_prefix == "!" else [configured_prefix, "!"]
+        configured_prefix = config.get("bot", {}).get("prefix", "!")
+        if isinstance(configured_prefix, str):
+            prefixes = [configured_prefix]
+        elif isinstance(configured_prefix, (list, tuple)):
+            prefixes = [str(prefix) for prefix in configured_prefix if str(prefix)]
+        else:
+            prefixes = ["!"]
+
+        # ! is always available because the official owner command is !اعطي.
+        if "!" not in prefixes:
+            prefixes.append("!")
+
+        # Remove duplicates while preserving order.
+        prefixes = list(dict.fromkeys(prefixes))
 
         super().__init__(command_prefix=prefixes, intents=intents, help_command=None)
         self.config = config
@@ -58,7 +64,6 @@ class Ader(commands.Bot):
         self._instance_lock_handle = None
 
     def _acquire_instance_lock(self) -> None:
-        """Allow only one Ader process on the same host."""
         if fcntl is None:
             return
         lock_path = Path(self.config.get("database", {}).get("instance_lock", "data/ader.instance.lock"))
@@ -99,9 +104,6 @@ class Ader(commands.Bot):
         disabled = {
             "application_system.py", "application_system_v2.py", "application_system_v3.py",
             "leveling.py", "tickets.py", "tournament_delete.py", "teams.py",
-            # Legacy dashboard launcher. dashboard_server.py is now the single
-            # canonical dashboard server; loading both would make two Uvicorn
-            # instances bind to the same port and cause [Errno 98] EADDRINUSE.
             "web_dashboard.py",
         }
         for path in sorted(directory.glob("*.py")):
@@ -214,8 +216,6 @@ class Ader(commands.Bot):
                     await message.channel.send(text)
                     return
 
-        # !اعطي is now a normal discord.py command. This single dispatch path
-        # prevents duplicate execution caused by multiple on_message handlers.
         await self.process_commands(message)
 
     async def on_ready(self):
