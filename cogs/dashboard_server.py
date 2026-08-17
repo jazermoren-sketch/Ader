@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
+import os
 
 from discord.ext import commands
 
@@ -50,6 +50,32 @@ class DashboardServer(commands.Cog):
             )
         """)
 
+    @staticmethod
+    def _resolve_port(cfg: dict) -> int:
+        """Resolve the externally allocated hosting port.
+
+        Quaxly/FeatherPanel normally exposes the allocated port through
+        SERVER_PORT. Using it takes precedence over the old hard-coded 8000
+        value, so the dashboard listens on the same public allocation as the
+        bot container. DASHBOARD_PORT is also supported for hosts that expose
+        a dashboard-specific variable.
+        """
+        candidates = (
+            os.getenv("DASHBOARD_PORT"),
+            os.getenv("SERVER_PORT"),
+            os.getenv("PORT"),
+            cfg.get("port"),
+            8000,
+        )
+        for value in candidates:
+            try:
+                port = int(str(value).strip())
+            except (TypeError, ValueError):
+                continue
+            if 1 <= port <= 65535:
+                return port
+        return 8000
+
     async def cog_load(self):
         cfg = self.bot.config.get("web", {}) or {}
         if not cfg.get("enabled", True):
@@ -65,11 +91,13 @@ class DashboardServer(commands.Cog):
             self.log.error("Dashboard dependencies are unavailable: %s", exc, exc_info=True)
             return
 
-        host = str(cfg.get("host", "0.0.0.0"))
-        try:
-            port = int(cfg.get("port", 8000))
-        except (TypeError, ValueError):
-            port = 8000
+        host = str(
+            os.getenv("DASHBOARD_HOST")
+            or os.getenv("SERVER_IP")
+            or cfg.get("host", "0.0.0.0")
+        ).strip() or "0.0.0.0"
+        port = self._resolve_port(cfg)
+        public_url = str(cfg.get("public_url", "https://nova.aro/")).strip().rstrip("/") + "/"
 
         app = create_app(self.bot)
         config = uvicorn.Config(
@@ -83,7 +111,12 @@ class DashboardServer(commands.Cog):
         )
         self.server = uvicorn.Server(config)
         self.task = asyncio.create_task(self.server.serve(), name="nova-aro-dashboard")
-        self.log.info("Nova Aro dashboard starting on %s:%s", host, port)
+        self.log.info(
+            "Nova Aro dashboard starting on %s:%s | public URL: %s",
+            host,
+            port,
+            public_url,
+        )
 
         # Give uvicorn a short chance to report immediate bind/import failures.
         await asyncio.sleep(0)
