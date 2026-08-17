@@ -15,7 +15,16 @@ from utils.logger import BotLogger
 load_dotenv()
 discord.timedelta = timedelta
 
+# Linux/Termux/Quaxly all support flock. The lock is process-owned and is
+# automatically released by the OS if the process crashes, preventing multiple
+# local Ader processes from connecting with the same Discord token.
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None
+
 _original_context_send = commands.Context.send
+
 
 async def _context_send(self, *args, **kwargs):
     content = getattr(getattr(self, "message", None), "content", "") or ""
@@ -24,7 +33,9 @@ async def _context_send(self, *args, **kwargs):
         kwargs.setdefault("reference", self.message)
     return await _original_context_send(self, *args, **kwargs)
 
+
 commands.Context.send = _context_send
+
 
 class Ader(commands.Bot):
     def __init__(self, config: dict):
@@ -32,13 +43,53 @@ class Ader(commands.Bot):
         intents.message_content = True
         intents.members = True
         intents.presences = True
-        super().__init__(command_prefix=config.get("bot", {}).get("prefix", "/"), intents=intents, help_command=None)
+
+        configured_prefix = config.get("bot", {}).get("prefix", "/")
+        # Keep the configured prefix and explicitly support ! for the official
+        # !اعطي command. Prefix commands are routed by discord.py, not by a
+        # second on_message handler.
+        prefixes = [configured_prefix] if configured_prefix == "!" else [configured_prefix, "!"]
+
+        super().__init__(command_prefix=prefixes, intents=intents, help_command=None)
         self.config = config
         self.start_time = discord.utils.utcnow()
         self.logger = BotLogger(config.get("logging", {}))
         self.db = DatabaseManager(config.get("database", {}).get("sqlite_path", "data/ader.sqlite3"))
+        self._instance_lock_handle = None
+
+    def _acquire_instance_lock(self) -> None:
+        """Allow only one Ader process on the same host."""
+        if fcntl is None:
+            return
+        lock_path = Path(self.config.get("database", {}).get("instance_lock", "data/ader.instance.lock"))
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, "a+", encoding="utf-8")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            handle.close()
+            raise RuntimeError(
+                "Another Ader process is already running with this installation. "
+                "Stop the duplicate process before starting Ader again."
+            ) from exc
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()))
+        handle.flush()
+        self._instance_lock_handle = handle
+
+    def _release_instance_lock(self) -> None:
+        if self._instance_lock_handle is None:
+            return
+        try:
+            if fcntl is not None:
+                fcntl.flock(self._instance_lock_handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._instance_lock_handle.close()
+            self._instance_lock_handle = None
 
     async def setup_hook(self):
+        self._acquire_instance_lock()
         await self.db.connect()
         await self.load_cogs()
 
@@ -162,6 +213,9 @@ class Ader(commands.Bot):
                     ok, text = await economy._transfer_amount(message.guild, message.author, member, amount)
                     await message.channel.send(text)
                     return
+
+        # !اعطي is now a normal discord.py command. This single dispatch path
+        # prevents duplicate execution caused by multiple on_message handlers.
         await self.process_commands(message)
 
     async def on_ready(self):
@@ -187,7 +241,9 @@ class Ader(commands.Bot):
         try:
             await self.db.disconnect()
         finally:
+            self._release_instance_lock()
             await super().close()
+
 
 def _get_discord_token(config: dict) -> str:
     token = os.getenv("DISCORD_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
@@ -204,14 +260,17 @@ def _get_discord_token(config: dict) -> str:
         raise RuntimeError("Discord bot token is not configured. Set DISCORD_BOT_TOKEN in the hosting panel.")
     return token
 
+
 def load_config():
     with open("config.yaml", "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
 
 async def main():
     config = load_config()
     token = _get_discord_token(config)
     await Ader(config).start(token)
+
 
 if __name__ == "__main__":
     try:
