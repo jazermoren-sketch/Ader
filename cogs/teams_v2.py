@@ -75,7 +75,9 @@ class TeamsV2(commands.Cog):
         await self.db.execute("CREATE TABLE IF NOT EXISTS team_settings(guild_id INTEGER PRIMARY KEY,coach_role_id INTEGER,max_players INTEGER NOT NULL DEFAULT 15,list_channel_id INTEGER,list_message_id INTEGER,updated_at REAL NOT NULL)")
         now=time.time(); await self.db.execute("UPDATE team_offers SET status='expired' WHERE status='pending' AND expires_at<=?",(now,))
         for r in await self.db.fetchall("SELECT id FROM team_offers WHERE status='pending' AND expires_at>?",(now,)): self.bot.add_view(OfferView(self,int(r[0])))
-        for r in await self.db.fetchall("SELECT guild_id,message_id FROM team_settings WHERE message_id IS NOT NULL"): self.bot.add_view(ListView(self,int(r[0])),message_id=int(r[1]))
+        # FIX: the table stores the persistent message as list_message_id, not message_id.
+        for r in await self.db.fetchall("SELECT guild_id,list_message_id FROM team_settings WHERE list_message_id IS NOT NULL"):
+            self.bot.add_view(ListView(self,int(r[0])),message_id=int(r[1]))
     async def cfg(self,g):
         r=await self.db.fetchone("SELECT * FROM team_settings WHERE guild_id=?",(g,))
         if r:return dict(r)
