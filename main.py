@@ -50,6 +50,10 @@ class Ader(commands.Bot):
         disabled = {
             "application_system.py", "application_system_v2.py", "application_system_v3.py",
             "leveling.py", "tickets.py", "tournament_delete.py", "teams.py",
+            # Legacy dashboard launcher. dashboard_server.py is now the single
+            # canonical dashboard server; loading both would make two Uvicorn
+            # instances bind to the same port and cause [Errno 98] EADDRINUSE.
+            "web_dashboard.py",
         }
         for path in sorted(directory.glob("*.py")):
             if path.stem.startswith("_") or path.stem == "__init__" or path.name in disabled:
