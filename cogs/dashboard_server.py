@@ -1,8 +1,4 @@
-"""Nova Aro dashboard web server.
-
-Starts the authenticated FastAPI dashboard alongside Ader and creates the
-small dashboard-only persistence tables that are independent from bot modules.
-"""
+"""Nova Aro dashboard web server."""
 from __future__ import annotations
 
 import asyncio
@@ -20,8 +16,6 @@ class DashboardServer(commands.Cog):
         self.log = logging.getLogger("Ader.dashboard")
 
     async def _migrate_dashboard(self):
-        # These tables deliberately use simple JSON ID arrays so the dashboard
-        # can configure permissions without coupling itself to Discord objects.
         await self.bot.db.execute("""
             CREATE TABLE IF NOT EXISTS dashboard_command_settings (
                 guild_id INTEGER NOT NULL,
@@ -52,14 +46,7 @@ class DashboardServer(commands.Cog):
 
     @staticmethod
     def _resolve_port(cfg: dict) -> int:
-        """Resolve the externally allocated hosting port.
-
-        Quaxly/FeatherPanel normally exposes the allocated port through
-        SERVER_PORT. Using it takes precedence over the old hard-coded 8000
-        value, so the dashboard listens on the same public allocation as the
-        bot container. DASHBOARD_PORT is also supported for hosts that expose
-        a dashboard-specific variable.
-        """
+        """Resolve the port allocated by the hosting panel."""
         candidates = (
             os.getenv("DASHBOARD_PORT"),
             os.getenv("SERVER_PORT"),
@@ -76,6 +63,23 @@ class DashboardServer(commands.Cog):
                 return port
         return 8000
 
+    @staticmethod
+    def _resolve_host(cfg: dict) -> str:
+        """Choose a bind address that actually exists inside the container.
+
+        SERVER_IP is the panel's public/NAT address and commonly does NOT
+        exist as a local interface inside the container. Binding to it causes
+        uvicorn to fail with: ``could not bind on any address``. Therefore it
+        is intentionally never used as a bind host. Use DASHBOARD_HOST only
+        when a host explicitly needs a non-default local interface.
+        """
+        explicit = os.getenv("DASHBOARD_HOST") or cfg.get("host")
+        if explicit:
+            host = str(explicit).strip()
+            if host:
+                return host
+        return "0.0.0.0"
+
     async def cog_load(self):
         cfg = self.bot.config.get("web", {}) or {}
         if not cfg.get("enabled", True):
@@ -91,11 +95,7 @@ class DashboardServer(commands.Cog):
             self.log.error("Dashboard dependencies are unavailable: %s", exc, exc_info=True)
             return
 
-        host = str(
-            os.getenv("DASHBOARD_HOST")
-            or os.getenv("SERVER_IP")
-            or cfg.get("host", "0.0.0.0")
-        ).strip() or "0.0.0.0"
+        host = self._resolve_host(cfg)
         port = self._resolve_port(cfg)
         public_url = str(cfg.get("public_url", "https://nova.aro/")).strip().rstrip("/") + "/"
 
@@ -118,7 +118,6 @@ class DashboardServer(commands.Cog):
             public_url,
         )
 
-        # Give uvicorn a short chance to report immediate bind/import failures.
         await asyncio.sleep(0)
         if self.task.done() and self.task.exception():
             raise self.task.exception()
