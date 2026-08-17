@@ -93,6 +93,74 @@ class Ader(commands.Bot):
                 balance = await self.db.get_balance(member.id)
             await ctx.send(f"🪙 تم إعطاء {member.mention} **{amount:,} ANOCoin**. الرصيد الجديد: **{balance:,} ANOCoin**.")
 
+    async def on_message(self, message: discord.Message):
+        """Handle the economy shortcut exactly as `A @user` / `A @user amount`.
+
+        This is intentionally handled before normal prefix-command parsing because
+        `A` is a shortcut token, not a conventional command prefix.
+        """
+        if message.author.bot:
+            return
+        if message.guild is not None:
+            raw = message.content.strip()
+            parts = raw.split()
+            if parts and parts[0].lower() == "a":
+                economy = self.get_cog("Economy")
+                if economy is not None:
+                    mentions = list(message.mentions)
+                    if len(mentions) > 1:
+                        await message.channel.send("❌ يرجى تحديد عضو واحد فقط.", delete_after=8)
+                        return
+                    if len(parts) == 1 and not mentions:
+                        balance = await self.db.get_balance(message.author.id)
+                        await message.channel.send(f"🪙 رصيدك الحالي هو **{balance:,} ANOCoin**.")
+                        return
+                    if not mentions:
+                        await message.channel.send("❌ الاستعمال: `A @العضو` أو `A @العضو المبلغ`.", delete_after=8)
+                        return
+                    member = mentions[0]
+                    amount = None
+                    if len(parts) >= 3:
+                        amount_text = parts[-1].replace(",", "")
+                        try:
+                            amount = int(amount_text)
+                        except ValueError:
+                            await message.channel.send("❌ المبلغ يجب أن يكون رقماً صحيحاً.", delete_after=8)
+                            return
+                    elif len(parts) == 2:
+                        amount = None
+                    else:
+                        await message.channel.send("❌ الاستعمال: `A @العضو` أو `A @العضو المبلغ`.", delete_after=8)
+                        return
+
+                    if amount is None:
+                        balance = await self.db.get_balance(member.id)
+                        await message.channel.send(f"🪙 رصيد {member.mention} الحالي هو **{balance:,} ANOCoin**.")
+                        return
+
+                    if amount <= 0:
+                        await message.channel.send("❌ يجب أن يكون المبلغ أكبر من صفر.", delete_after=8)
+                        return
+                    if member.bot or member.id == message.author.id:
+                        await message.channel.send("❌ لا يمكنك التحويل إلى نفسك أو إلى بوت.", delete_after=8)
+                        return
+
+                    fee = max(1, int((amount * 0.05) + 0.999999))
+                    total = amount + fee
+                    balance = await self.db.get_balance(message.author.id)
+                    if balance < total:
+                        await message.channel.send(f"❌ رصيدك غير كافٍ. تحتاج **{total:,} ANOCoin**، ورصيدك الحالي **{balance:,} ANOCoin**.", delete_after=10)
+                        return
+
+                    confirmed = await economy._confirm(message.channel, message.author, message.guild.id, "التحويل")
+                    if not confirmed:
+                        return
+                    ok, text = await economy._transfer_amount(message.guild, message.author, member, amount)
+                    await message.channel.send(text)
+                    return
+
+        await self.process_commands(message)
+
     async def on_ready(self):
         types = {"playing": discord.ActivityType.playing, "watching": discord.ActivityType.watching, "listening": discord.ActivityType.listening, "streaming": discord.ActivityType.streaming}
         typ = self.config.get("bot", {}).get("activity_type", "watching")
