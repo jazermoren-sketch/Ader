@@ -50,8 +50,9 @@ modules:
 
 web:
   enabled: true
-  name: "nova.aro"
-  public_url: "https://nova.aro"
+  name: "nova.hattena.com"
+  public_url: "https://nova.hattena.com"
   host: "0.0.0.0"
+  # Quaxly/FeatherPanel can override this with SERVER_PORT, PORT or DASHBOARD_PORT.
   port: 8000
-  cors_origins: ["https://nova.aro"]
+  cors_origins: ["https://nova.hattena.com"]
