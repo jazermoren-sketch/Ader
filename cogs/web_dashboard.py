@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 from discord.ext import commands
 
@@ -22,6 +23,10 @@ class WebDashboard(commands.Cog):
         except Exception as exc:
             self.bot.logger.error(f"Dashboard dependencies are unavailable: {exc}")
             return
+
+        public_url = str(web_cfg.get("public_url", "")).rstrip("/")
+        if public_url and not os.getenv("DASHBOARD_REDIRECT_URI"):
+            os.environ["DASHBOARD_REDIRECT_URI"] = public_url + "/callback"
 
         app = create_app(self.bot)
         config = uvicorn.Config(
