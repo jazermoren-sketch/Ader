@@ -1,13 +1,13 @@
 """Nova Aro dashboard web server.
 
-Runs the authenticated FastAPI dashboard alongside the Discord bot. The actual
-UI/API lives in ``web.api_v2``; this cog is intentionally only the lifecycle
-adapter so the dashboard starts and stops with Ader.
+Starts the authenticated FastAPI dashboard alongside Ader and creates the
+small dashboard-only persistence tables that are independent from bot modules.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from discord.ext import commands
 
@@ -19,11 +19,44 @@ class DashboardServer(commands.Cog):
         self.task: asyncio.Task | None = None
         self.log = logging.getLogger("Ader.dashboard")
 
+    async def _migrate_dashboard(self):
+        # These tables deliberately use simple JSON ID arrays so the dashboard
+        # can configure permissions without coupling itself to Discord objects.
+        await self.bot.db.execute("""
+            CREATE TABLE IF NOT EXISTS dashboard_command_settings (
+                guild_id INTEGER NOT NULL,
+                command_name TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                allowed_roles TEXT NOT NULL DEFAULT '[]',
+                denied_roles TEXT NOT NULL DEFAULT '[]',
+                allowed_channels TEXT NOT NULL DEFAULT '[]',
+                denied_channels TEXT NOT NULL DEFAULT '[]',
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (guild_id, command_name)
+            )
+        """)
+        await self.bot.db.execute("""
+            CREATE TABLE IF NOT EXISTS dashboard_shortcut_settings (
+                guild_id INTEGER NOT NULL,
+                shortcut_name TEXT NOT NULL,
+                alias TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                allowed_roles TEXT NOT NULL DEFAULT '[]',
+                denied_roles TEXT NOT NULL DEFAULT '[]',
+                allowed_channels TEXT NOT NULL DEFAULT '[]',
+                denied_channels TEXT NOT NULL DEFAULT '[]',
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (guild_id, shortcut_name)
+            )
+        """)
+
     async def cog_load(self):
         cfg = self.bot.config.get("web", {}) or {}
         if not cfg.get("enabled", True):
             self.log.info("Nova Aro dashboard is disabled in config")
             return
+
+        await self._migrate_dashboard()
 
         try:
             import uvicorn
@@ -51,6 +84,11 @@ class DashboardServer(commands.Cog):
         self.server = uvicorn.Server(config)
         self.task = asyncio.create_task(self.server.serve(), name="nova-aro-dashboard")
         self.log.info("Nova Aro dashboard starting on %s:%s", host, port)
+
+        # Give uvicorn a short chance to report immediate bind/import failures.
+        await asyncio.sleep(0)
+        if self.task.done() and self.task.exception():
+            raise self.task.exception()
 
     async def cog_unload(self):
         if self.server is not None:
