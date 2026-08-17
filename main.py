@@ -39,6 +39,7 @@ class Ader(commands.Bot):
         self.logger = BotLogger(config.get("logging", {}))
         self.db = DatabaseManager(config.get("database", {}).get("sqlite_path", "data/ader.sqlite3"))
         self._owner_give_lock = asyncio.Lock()
+        self._owner_give_processed: set[int] = set()
 
     async def setup_hook(self):
         await self.db.connect()
@@ -113,21 +114,46 @@ class Ader(commands.Bot):
     def _replace_owner_give_command(self):
         while self.get_command("اعطي") is not None:
             self.remove_command("اعطي")
+
         @self.command(name="اعطي", help="Owner-only ANOCoin grant")
         async def owner_give(ctx: commands.Context, member: discord.Member | None = None, amount: int | None = None):
             if ctx.author.id != 1472570059367911587:
                 return
             if ctx.guild is None or member is None or amount is None or amount <= 0 or member.bot:
                 return await ctx.send("❌ الاستعمال: `!اعطي @user المبلغ`", delete_after=6)
+
+            # A Discord message must be granted at most once.  The in-memory
+            # guard handles duplicate dispatches in the same process before
+            # SQLite is touched; the UNIQUE primary key below also protects
+            # against concurrent/retried dispatches that reach SQLite.
+            message_id = ctx.message.id
             async with self._owner_give_lock:
-                key = f"owner-give:{ctx.message.id}"
-                cur = await self.db.execute("INSERT OR IGNORE INTO processed_commands(command_key,created_at) VALUES(?,?)", (key, time.time()))
+                if message_id in self._owner_give_processed:
+                    return
+
+                key = f"owner-give:{message_id}"
+                cur = await self.db.execute(
+                    "INSERT OR IGNORE INTO processed_commands(command_key,created_at) VALUES(?,?)",
+                    (key, time.time()),
+                )
                 if cur.rowcount != 1:
-                    return await ctx.send("⚠️ هاد الأمر راه تعالج من قبل.", delete_after=6)
-                if not await self.db.add_balance(member.id, ctx.guild.id, amount):
-                    return await ctx.send("❌ تعذر إضافة العملة.", delete_after=6)
-                balance = await self.db.get_balance(member.id)
-            await ctx.send(f"🪙 تم إعطاء {member.mention} **{amount:,} ANOCoin**. الرصيد الجديد: **{balance:,} ANOCoin**.")
+                    self._owner_give_processed.add(message_id)
+                    return
+
+                self._owner_give_processed.add(message_id)
+                try:
+                    if not await self.db.add_balance(member.id, ctx.guild.id, amount):
+                        self._owner_give_processed.discard(message_id)
+                        return await ctx.send("❌ تعذر إضافة العملة.", delete_after=6)
+                    balance = await self.db.get_balance(member.id)
+                except Exception:
+                    self._owner_give_processed.discard(message_id)
+                    raise
+
+            await ctx.send(
+                f"🪙 تم إعطاء {member.mention} **{amount:,} ANOCoin**. "
+                f"الرصيد الجديد: **{balance:,} ANOCoin**."
+            )
 
     async def on_message(self, message: discord.Message):
         if message.author.bot:
