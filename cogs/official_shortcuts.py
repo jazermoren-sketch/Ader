@@ -1,5 +1,9 @@
 """Official, immutable economy shortcuts for Ader."""
 
+from __future__ import annotations
+
+import asyncio
+
 import discord
 from discord.ext import commands
 
@@ -10,12 +14,12 @@ BOT_OWNER_ID = 1472570059367911587
 class OfficialShortcuts(commands.Cog):
     """Built-in shortcuts that are not editable through the shortcuts system."""
 
-    # The balance shortcut is intentionally fixed and cannot be changed from the
-    # server shortcut manager. `A` is the only official balance trigger.
     FIXED_BALANCE_ALIASES = {"a"}
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._owner_give_lock = asyncio.Lock()
+        self._owner_give_processed: set[int] = set()
 
     async def _reply(self, message: discord.Message, content: str = None, **kwargs):
         return await message.reply(content=content, mention_author=False, **kwargs)
@@ -57,10 +61,23 @@ class OfficialShortcuts(commands.Cog):
             await self._reply(message, "❌ ما يمكنش تعطي العملة لبوت.", delete_after=6)
             return
 
-        await self.bot.db.add_balance(target.id, message.guild.id, amount)
+        # This shortcut is the single owner-only implementation of !اعطي.
+        # A Discord message must be processed at most once, even if an event
+        # is dispatched more than once or another handler is accidentally
+        # retried in the same process.
+        async with self._owner_give_lock:
+            if message.id in self._owner_give_processed:
+                return
+            self._owner_give_processed.add(message.id)
+            try:
+                await self.bot.db.add_balance(target.id, message.guild.id, amount)
+                new_balance = await self.bot.db.get_balance(target.id)
+            except Exception:
+                self._owner_give_processed.discard(message.id)
+                raise
+
         name = self.bot.config.get("modules", {}).get("economy", {}).get("currency_name", "ANOCoin")
         symbol = self.bot.config.get("modules", {}).get("economy", {}).get("currency_symbol", "🪙")
-        new_balance = await self.bot.db.get_balance(target.id)
 
         embed = discord.Embed(
             title=f"{symbol} تم إعطاء العملة",
