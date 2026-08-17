@@ -18,7 +18,6 @@ discord.timedelta = timedelta
 
 _original_context_send = commands.Context.send
 
-
 async def _context_send(self, *args, **kwargs):
     content = getattr(getattr(self, "message", None), "content", "") or ""
     if content.strip().startswith("!") and getattr(self, "message", None) is not None:
@@ -26,9 +25,7 @@ async def _context_send(self, *args, **kwargs):
         kwargs.setdefault("reference", self.message)
     return await _original_context_send(self, *args, **kwargs)
 
-
 commands.Context.send = _context_send
-
 
 class Ader(commands.Bot):
     def __init__(self, config: dict):
@@ -52,8 +49,7 @@ class Ader(commands.Bot):
         loaded = 0
         disabled = {
             "application_system.py", "application_system_v2.py", "application_system_v3.py",
-            "leveling.py", "tickets.py", "tournament_delete.py",
-            # AdvancedTournament is the single owner of tournament-delete/settings/view UI.
+            "leveling.py", "tickets.py", "tournament_delete.py", "teams.py",
         }
         for path in sorted(directory.glob("*.py")):
             if path.stem.startswith("_") or path.stem == "__init__" or path.name in disabled:
@@ -68,7 +64,6 @@ class Ader(commands.Bot):
                 loaded += 1
             except Exception as exc:
                 self.logger.error(f"Failed to load cog {path.stem}: {exc}", exc_info=True)
-
         self._remove_legacy_ticket_commands()
         self._replace_owner_give_command()
         self.logger.info(f"Loaded {loaded} cogs")
@@ -82,21 +77,15 @@ class Ader(commands.Bot):
     def _replace_owner_give_command(self):
         while self.get_command("اعطي") is not None:
             self.remove_command("اعطي")
-
         @self.command(name="اعطي", help="Owner-only ANOCoin grant")
         async def owner_give(ctx: commands.Context, member: discord.Member | None = None, amount: int | None = None):
             if ctx.author.id != 1472570059367911587:
                 return
             if ctx.guild is None or member is None or amount is None or amount <= 0 or member.bot:
                 return await ctx.send("❌ الاستعمال: `!اعطي @user المبلغ`", delete_after=6)
-            # One lock + one persistent idempotency key means the same Discord
-            # message can never grant the amount twice, even if two handlers race.
             async with self._owner_give_lock:
                 key = f"owner-give:{ctx.message.id}"
-                cur = await self.db.execute(
-                    "INSERT OR IGNORE INTO processed_commands(command_key,created_at) VALUES(?,?)",
-                    (key, time.time()),
-                )
+                cur = await self.db.execute("INSERT OR IGNORE INTO processed_commands(command_key,created_at) VALUES(?,?)", (key, time.time()))
                 if cur.rowcount != 1:
                     return await ctx.send("⚠️ هاد الأمر راه تعالج من قبل.", delete_after=6)
                 if not await self.db.add_balance(member.id, ctx.guild.id, amount):
@@ -129,7 +118,6 @@ class Ader(commands.Bot):
         finally:
             await super().close()
 
-
 def _get_discord_token(config: dict) -> str:
     token = os.getenv("DISCORD_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
     if not token:
@@ -145,17 +133,14 @@ def _get_discord_token(config: dict) -> str:
         raise RuntimeError("Discord bot token is not configured. Set DISCORD_BOT_TOKEN in the hosting panel.")
     return token
 
-
 def load_config():
     with open("config.yaml", "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
-
 
 async def main():
     config = load_config()
     token = _get_discord_token(config)
     await Ader(config).start(token)
-
 
 if __name__ == "__main__":
     try:
