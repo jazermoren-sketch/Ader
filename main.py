@@ -74,6 +74,38 @@ class Ader(commands.Bot):
             if name != "ticket" and "ticket" in name:
                 self.tree.remove_command(command.name)
 
+    async def _dashboard_allowed(self, guild_id: int, command_name: str, user, channel_id=None):
+        try:
+            cog = self.get_cog("DashboardConfig")
+            if cog:
+                return await cog.allowed(guild_id, command_name, user, channel_id)
+            return True, ""
+        except Exception as exc:
+            self.logger.error(f"Dashboard rule check failed: {exc}")
+            return True, ""
+
+    async def _dashboard_deny(self, interaction, text: str):
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(f"❌ {text}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ {text}", ephemeral=True)
+        except Exception:
+            pass
+
+    async def on_interaction(self, interaction: discord.Interaction):
+        if interaction.guild is not None and interaction.type is discord.InteractionType.application_command:
+            command = getattr(interaction, "command", None)
+            if command is not None:
+                name = getattr(command, "qualified_name", None) or getattr(command, "name", "")
+                allowed, reason = await self._dashboard_allowed(
+                    interaction.guild.id, name, interaction.user, getattr(interaction.channel, "id", None)
+                )
+                if not allowed:
+                    await self._dashboard_deny(interaction, reason)
+                    return
+        await super().on_interaction(interaction)
+
     def _replace_owner_give_command(self):
         while self.get_command("اعطي") is not None:
             self.remove_command("اعطي")
@@ -94,11 +126,6 @@ class Ader(commands.Bot):
             await ctx.send(f"🪙 تم إعطاء {member.mention} **{amount:,} ANOCoin**. الرصيد الجديد: **{balance:,} ANOCoin**.")
 
     async def on_message(self, message: discord.Message):
-        """Handle the economy shortcut exactly as `A @user` / `A @user amount`.
-
-        This is intentionally handled before normal prefix-command parsing because
-        `A` is a shortcut token, not a conventional command prefix.
-        """
         if message.author.bot:
             return
         if message.guild is not None:
@@ -121,9 +148,8 @@ class Ader(commands.Bot):
                     member = mentions[0]
                     amount = None
                     if len(parts) >= 3:
-                        amount_text = parts[-1].replace(",", "")
                         try:
-                            amount = int(amount_text)
+                            amount = int(parts[-1].replace(",", ""))
                         except ValueError:
                             await message.channel.send("❌ المبلغ يجب أن يكون رقماً صحيحاً.", delete_after=8)
                             return
@@ -132,33 +158,28 @@ class Ader(commands.Bot):
                     else:
                         await message.channel.send("❌ الاستعمال: `A @العضو` أو `A @العضو المبلغ`.", delete_after=8)
                         return
-
                     if amount is None:
                         balance = await self.db.get_balance(member.id)
                         await message.channel.send(f"🪙 رصيد {member.mention} الحالي هو **{balance:,} ANOCoin**.")
                         return
-
                     if amount <= 0:
                         await message.channel.send("❌ يجب أن يكون المبلغ أكبر من صفر.", delete_after=8)
                         return
                     if member.bot or member.id == message.author.id:
                         await message.channel.send("❌ لا يمكنك التحويل إلى نفسك أو إلى بوت.", delete_after=8)
                         return
-
                     fee = max(1, int((amount * 0.05) + 0.999999))
                     total = amount + fee
                     balance = await self.db.get_balance(message.author.id)
                     if balance < total:
                         await message.channel.send(f"❌ رصيدك غير كافٍ. تحتاج **{total:,} ANOCoin**، ورصيدك الحالي **{balance:,} ANOCoin**.", delete_after=10)
                         return
-
                     confirmed = await economy._confirm(message.channel, message.author, message.guild.id, "التحويل")
                     if not confirmed:
                         return
                     ok, text = await economy._transfer_amount(message.guild, message.author, member, amount)
                     await message.channel.send(text)
                     return
-
         await self.process_commands(message)
 
     async def on_ready(self):
