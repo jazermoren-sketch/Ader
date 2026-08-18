@@ -53,20 +53,29 @@ class WebDashboard(commands.Cog):
                     f"Nova Aro OAuth redirect URI set to {expected_redirect}"
                 )
         elif configured_redirect and not self._valid_redirect_uri(configured_redirect):
-            # Keep OAuth usable even if the environment contains a malformed
-            # URI. api_v2 will derive the callback from request.base_url.
             os.environ.pop("DASHBOARD_REDIRECT_URI", None)
             self.bot.logger.warning(
                 "Invalid DASHBOARD_REDIRECT_URI detected; using the dashboard public URL/request URL instead."
             )
 
         app = create_app(self.bot)
+
+        # The dashboard is normally exposed through Quaxly's reverse proxy.
+        # Trust forwarded host/proto headers so redirects and request.base_url
+        # use the public URL instead of the internal HTTP listener.
+        forwarded_allow_ips = str(
+            web_cfg.get("forwarded_allow_ips")
+            or os.getenv("DASHBOARD_FORWARDED_ALLOW_IPS")
+            or "*"
+        )
         config = uvicorn.Config(
             app,
             host=str(web_cfg.get("host", "0.0.0.0")),
             port=int(web_cfg.get("port", 8000)),
             log_level="warning",
             access_log=False,
+            proxy_headers=True,
+            forwarded_allow_ips=forwarded_allow_ips,
         )
         self.server = uvicorn.Server(config)
         self.server_task = asyncio.create_task(self.server.serve(), name="nova-aro-dashboard")
