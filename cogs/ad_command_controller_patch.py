@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import random
 import re
 import time
 import unicodedata
@@ -13,17 +11,11 @@ from discord.ext import commands
 
 class AdComposeModal(discord.ui.Modal, title="اكتب إعلانك"):
     ad_text = discord.ui.TextInput(
-        label="الإعلان",
-        placeholder="اكتب محتوى الإعلان هنا...",
-        style=discord.TextStyle.paragraph,
-        max_length=4000,
-        required=True,
+        label="الإعلان", placeholder="اكتب محتوى الإعلان هنا...",
+        style=discord.TextStyle.paragraph, max_length=4000, required=True,
     )
     room_name = discord.ui.TextInput(
-        label="اسم الروم",
-        placeholder="اسم روم الإعلان",
-        max_length=90,
-        required=True,
+        label="اسم الروم", placeholder="اسم روم الإعلان", max_length=90, required=True,
     )
 
     def __init__(self, cog, guild_id: int, target_id: int, invoker_id: int, mention_type: str):
@@ -44,7 +36,7 @@ class AdComposeModal(discord.ui.Modal, title="اكتب إعلانك"):
             "SELECT * FROM ad_pending WHERE guild_id=? AND target_id=? AND invoker_id=? AND active=1",
             (self.guild_id, self.target_id, self.invoker_id),
         )
-        if not pending or int(pending["mention_type"] == ""):
+        if not pending or not str(pending["mention_type"]):
             return await interaction.response.send_message("❌ انتهت صلاحية عملية الإعلان. أعد استخدام `$اعلان @user`.", ephemeral=True)
 
         await interaction.response.defer(ephemeral=True)
@@ -63,9 +55,7 @@ class AdComposeModal(discord.ui.Modal, title="اكتب إعلانك"):
         }
         try:
             channel = await guild.create_text_channel(
-                name,
-                category=None,
-                overwrites=overwrites,
+                name, category=None, overwrites=overwrites,
                 reason=f"Ader advertising room for {interaction.user} created by {self.invoker_id}",
             )
         except (discord.Forbidden, discord.HTTPException):
@@ -75,8 +65,10 @@ class AdComposeModal(discord.ui.Modal, title="اكتب إعلانك"):
             await self.cog.db.execute(
                 """INSERT INTO ad_rooms(guild_id,channel_id,owner_id,mention_type,template,active)
                    VALUES(?,?,?,?,?,1)
-                   ON CONFLICT(channel_id) DO UPDATE SET owner_id=excluded.owner_id,mention_type=excluded.mention_type,active=1""",
-                (guild.id, channel.id, self.target_id, self.mention_type, "",),
+                   ON CONFLICT(channel_id) DO UPDATE SET
+                     owner_id=excluded.owner_id, mention_type=excluded.mention_type,
+                     template=excluded.template, active=1""",
+                (guild.id, channel.id, self.target_id, self.mention_type, ""),
             )
             await self.cog.db.execute(
                 "UPDATE ad_pending SET active=0, channel_id=? WHERE guild_id=? AND target_id=? AND invoker_id=?",
@@ -88,8 +80,11 @@ class AdComposeModal(discord.ui.Modal, title="اكتب إعلانك"):
             )
 
             mention = "@everyone" if self.mention_type == "everyone" else "@here"
-            ad_content = f"{str(self.ad_text.value).rstrip()}\n\n{mention}"
-            await channel.send(ad_content, allowed_mentions=discord.AllowedMentions(everyone=True))
+            # The requested mention is always the final line of the advertisement.
+            await channel.send(
+                f"{str(self.ad_text.value).rstrip()}\n\n{mention}",
+                allowed_mentions=discord.AllowedMentions(everyone=True),
+            )
 
             settings = await self.cog.db.fetchone("SELECT * FROM ad_settings_v2 WHERE guild_id=?", (guild.id,))
             if settings and str(settings["post_message"] or "").strip():
@@ -98,6 +93,7 @@ class AdComposeModal(discord.ui.Modal, title="اكتب إعلانك"):
             if settings and int(settings["giveaway_enabled"] or 0):
                 await self.cog.start_configured_giveaway(guild, channel, settings)
 
+            # Image is intentionally sent last, after the advertisement, post-message and giveaway.
             if settings and settings["image_path"]:
                 path = Path(str(settings["image_path"]))
                 if path.exists():
@@ -132,11 +128,10 @@ class MentionChoiceView(discord.ui.View):
             (self.guild_id, self.target_id, self.invoker_id, mention_type, time.time()),
         )
         view = TargetComposeView(self.cog, self.guild_id, self.target_id, self.invoker_id, mention_type)
-        mention_label = "@everyone" if mention_type == "everyone" else "@here"
+        label = "@everyone" if mention_type == "everyone" else "@here"
         await interaction.response.edit_message(
-            content=f"**تم اختيار {mention_label}**\n\n<@{self.target_id}>، اضغط الزر بالأسفل لكتابة إعلانك.",
-            view=view,
-            allowed_mentions=discord.AllowedMentions(users=True),
+            content=f"**تم اختيار {label}**\n\n<@{self.target_id}>، اضغط الزر بالأسفل لكتابة إعلانك.",
+            view=view, allowed_mentions=discord.AllowedMentions(users=True),
         )
 
     @discord.ui.button(label="Everyone", emoji="🔴", style=discord.ButtonStyle.danger, custom_id="ader:ad:choose:everyone")
@@ -171,10 +166,7 @@ class AdCommandControllerPatch(commands.Cog):
 
     async def cog_load(self):
         await self.db.execute(
-            """CREATE TABLE IF NOT EXISTS ad_controllers(
-                channel_id INTEGER PRIMARY KEY,
-                controller_id INTEGER NOT NULL
-            )"""
+            "CREATE TABLE IF NOT EXISTS ad_controllers(channel_id INTEGER PRIMARY KEY, controller_id INTEGER NOT NULL)"
         )
         await self.db.execute(
             """CREATE TABLE IF NOT EXISTS ad_pending(
@@ -188,10 +180,9 @@ class AdCommandControllerPatch(commands.Cog):
                 PRIMARY KEY(guild_id,target_id,invoker_id)
             )"""
         )
-        shop = self.bot.get_cog("AdvertisingShop")
-        if not shop:
+        self.shop = self.bot.get_cog("AdvertisingShop")
+        if not self.shop:
             return
-        self.shop = shop
         self._install_command()
         self._install_helpers()
 
@@ -240,13 +231,14 @@ class AdCommandControllerPatch(commands.Cog):
                 (guild.id, channel.id, sponsor_id, amount, ends_at),
             )
             giveaway_id = cur.lastrowid
+            from cogs.advertising_shop import GiveawayView
             embed = discord.Embed(
                 title="🎁 قيف أواي ANOCoin",
                 description=f"الجائزة: **{amount:,} ANOCoin**\nينتهي: <t:{int(ends_at)}:R>\nاضغط **مشاركة** للدخول.",
                 colour=discord.Colour.green(),
             )
-            await channel.send(embed=embed, view=__import__("cogs.advertising_shop", fromlist=["GiveawayView"]).GiveawayView(self.shop, giveaway_id))
-            self.bot.add_view(__import__("cogs.advertising_shop", fromlist=["GiveawayView"]).GiveawayView(self.shop, giveaway_id))
+            await channel.send(embed=embed, view=GiveawayView(self.shop, giveaway_id))
+            self.bot.add_view(GiveawayView(self.shop, giveaway_id))
 
         self.shop.start_configured_giveaway = start_configured_giveaway
         self.shop._configured_giveaway_installed = True
