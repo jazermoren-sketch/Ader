@@ -41,7 +41,10 @@ modules:
     currency_name: "ANOCoin"
     currency_symbol: "🪙"
     starting_balance: 0
-    daily_reward: 100
+    # Daily reward is intentionally substantial but still scarce.
+    # z_daily_fix enforces the 24-hour cooldown and uses this value as policy documentation.
+    daily_reward: 25000
+    daily_cooldown: 86400
   tickets:
     enabled: true
   analytics:
