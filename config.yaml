@@ -38,7 +38,7 @@ modules:
     xp_cooldown: 60
   economy:
     enabled: true
-    currency_name: "ANOCoin"
+    currency_name: "ANORIS"
     currency_symbol: "🪙"
     starting_balance: 0
     # Daily reward is intentionally substantial but still scarce.
