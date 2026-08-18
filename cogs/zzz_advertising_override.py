@@ -51,15 +51,11 @@ class AdvertisingCommandOverride(commands.Cog):
         self.ad_cog = self.bot.get_cog("AdvertisingShop")
         if self.ad_cog is None:
             return
+        # advertising_shop.py registers the old command. Remove it before this
+        # Cog is registered, so only one $اعلان command exists.
         old = self.bot.get_command("اعلان")
         if old is not None:
             self.bot.remove_command(old.name)
-        self.bot.add_command(self.advertise)
-
-    def cog_unload(self):
-        current = self.bot.get_command("اعلان")
-        if current is not None and current.name == "اعلان":
-            self.bot.remove_command("اعلان")
 
     async def create_command_ad_room(self, guild: discord.Guild, owner_id: int):
         member = guild.get_member(owner_id)
@@ -94,6 +90,7 @@ class AdvertisingCommandOverride(commands.Cog):
 
     @commands.command(name="اعلان")
     async def advertise(self, ctx: commands.Context, member: discord.Member | None = None):
+        # Hard idempotency guard: the same Discord message can be handled once.
         message_id = ctx.message.id
         if message_id in self._processing:
             return
@@ -111,9 +108,9 @@ class AdvertisingCommandOverride(commands.Cog):
                 "SELECT * FROM ad_rooms WHERE guild_id=? AND owner_id=? AND active=1",
                 (ctx.guild.id, member.id),
             )
-            if row is None:
-                if await self.create_command_ad_room(ctx.guild, member.id) is None:
-                    return await ctx.reply("❌ تعذر إنشاء روم الإعلان. تأكد من صلاحية **Manage Channels** للبوت.", mention_author=False)
+            if row is None and await self.create_command_ad_room(ctx.guild, member.id) is None:
+                return await ctx.reply("❌ تعذر إنشاء روم الإعلان. تأكد من صلاحية **Manage Channels** للبوت.", mention_author=False)
+
             await ctx.reply(
                 f"**اختر نوع المنشن حق الروم**\n{member.mention}",
                 mention_author=False,
