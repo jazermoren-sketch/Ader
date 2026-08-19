@@ -142,10 +142,13 @@ class AdCustomization(commands.Cog):
     async def show_panel(self,interaction,edit=False):
         rows=await self.db.fetchall("SELECT * FROM ad_custom_messages WHERE guild_id=? ORDER BY position,id",(interaction.guild.id,))
         embed=discord.Embed(title="⚙️ تخصيص نظام الإعلانات",description="الرسائل، توقيتها، الـReply، والصلاحيات كلها من نفس اللوحة.",colour=discord.Colour.blurple())
-        for event,label,emoji in [("after_ad","بعد الإعلان","📢"),("after_giveaway","بعد القيف أواي","🎁"),("after_image","بعد الصورة","🖼️"),("after_all","بعد الاكتمال","🔗")]: embed.add_field(name=f"{emoji} {label}",value=f"**{sum(r['event']==event and int(r['enabled']) for r in rows)}** رسالة",inline=True)
+        for event,label,emoji in [("after_ad","بعد الإعلان","📢"),("after_giveaway","بعد القيف أواي","🎁"),("after_image","بعد الصورة","🖼️"),("after_all","بعد الاكتمال","🔗")]:
+            embed.add_field(name=f"{emoji} {label}",value=f"**{sum(r['event']==event and int(r['enabled']) for r in rows)}** رسالة",inline=True)
         if rows:
             lines=[]
-            for r in rows[:20]: lines.append(f"{'✅' if int(r['enabled']) else '⛔'} `{r['id']}` **{r['name']}** — {EVENTS.get(r['event'],r['event'])}{f' → Reply #{r[\"reply_to\"]}' if r['reply_to'] else ''}")
+            for r in rows[:20]:
+                state="✅" if int(r["enabled"]) else "⛔"; reply=f" → Reply #{r['reply_to']}" if r["reply_to"] else ""
+                lines.append(f"{state} `{r['id']}` **{r['name']}** — {EVENTS.get(r['event'],r['event'])}{reply}")
             embed.add_field(name="📋 الرسائل",value="\n".join(lines),inline=False)
         else: embed.add_field(name="📋 الرسائل",value="لا توجد رسائل مخصصة بعد.",inline=False)
         view=SettingsView(self,rows)
