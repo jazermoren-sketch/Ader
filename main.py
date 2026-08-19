@@ -80,7 +80,15 @@ class Ader(commands.Bot):
     async def load_cogs(self):
         directory = Path(__file__).parent / "cogs"
         loaded = 0
-        disabled = {"application_system.py", "application_system_v2.py", "application_system_v3.py", "leveling.py", "tickets.py", "tournament_delete.py", "teams.py"}
+        disabled = {
+            "application_system.py", "application_system_v2.py", "application_system_v3.py",
+            "leveling.py", "tickets.py", "tournament_delete.py", "teams.py",
+            # Legacy dashboard launcher. dashboard_server.py is now the single
+            # canonical dashboard server. Loading both creates two Uvicorn
+            # instances competing for the same port and can leave the public
+            # dashboard unavailable/blank after a restart.
+            "web_dashboard.py",
+        }
         for path in sorted(directory.glob("*.py")):
             if path.stem.startswith("_") or path.stem == "__init__" or path.name in disabled:
                 continue
