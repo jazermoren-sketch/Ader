@@ -26,8 +26,16 @@ class CommandSafety(commands.Cog):
         if self.installed:return
         original=self.bot.tree.add_command
         def safe_add(command,*,guild=None,guilds=None,override=False):
-            try:return original(command,guild=guild,guilds=guilds,override=override)
-            except app_commands.CommandAlreadyRegistered:return original(command,guild=guild,guilds=guilds,override=True)
+            kwargs={"override":override}
+            if guild is not None:
+                kwargs["guild"]=guild
+            elif guilds is not None:
+                kwargs["guilds"]=guilds
+            try:
+                return original(command,**kwargs)
+            except app_commands.CommandAlreadyRegistered:
+                kwargs["override"]=True
+                return original(command,**kwargs)
         self.bot.tree.add_command=safe_add;discord.ui.View.on_error=_view_error;discord.ui.Modal.on_error=_modal_error;self.bot.tree.on_error=self.tree_error
         await self.repair();self.installed=True
     async def tree_error(self,interaction,error):
