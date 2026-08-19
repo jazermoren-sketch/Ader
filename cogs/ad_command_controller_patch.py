@@ -18,48 +18,80 @@ class AdComposeModal(discord.ui.Modal, title="اكتب إعلانك"):
         label="اسم الروم", placeholder="اسم روم الإعلان", max_length=90, required=True,
     )
 
-    def __init__(self, cog, guild_id: int, target_id: int, invoker_id: int, mention_type: str):
+    def __init__(
+        self,
+        cog,
+        guild_id: int,
+        target_id: int,
+        invoker_id: int,
+        mention_type: str,
+        control_message_id: int,
+    ):
         super().__init__(timeout=None)
         self.cog = cog
         self.guild_id = guild_id
         self.target_id = target_id
         self.invoker_id = invoker_id
         self.mention_type = mention_type
+        self.control_message_id = control_message_id
 
     async def on_submit(self, interaction: discord.Interaction):
         if interaction.guild is None or interaction.guild.id != self.guild_id:
             return await interaction.response.send_message("❌ هذه العملية غير صالحة.", ephemeral=True)
         if interaction.user.id != self.target_id:
-            return await interaction.response.send_message("❌ هذا الزر مخصص للعضو الذي تم منشنه في أمر `$اعلان` فقط.", ephemeral=True)
+            return await interaction.response.send_message(
+                "❌ هذا الزر مخصص للعضو الذي تم منشنه في أمر `$اعلان` فقط.",
+                ephemeral=True,
+            )
 
         pending = await self.cog.db.fetchone(
             "SELECT * FROM ad_pending WHERE guild_id=? AND target_id=? AND invoker_id=? AND active=1",
             (self.guild_id, self.target_id, self.invoker_id),
         )
         if not pending or not str(pending["mention_type"]):
-            return await interaction.response.send_message("❌ انتهت صلاحية عملية الإعلان. أعد استخدام `$اعلان @user`.", ephemeral=True)
+            return await interaction.response.send_message(
+                "❌ انتهت صلاحية عملية الإعلان. أعد استخدام `$اعلان @user`.",
+                ephemeral=True,
+            )
 
         await interaction.response.defer(ephemeral=True)
         guild = interaction.guild
         if not guild.me or not guild.me.guild_permissions.manage_channels:
-            return await interaction.followup.send("❌ البوت يحتاج إلى صلاحية Manage Channels لإنشاء روم الإعلان.", ephemeral=True)
+            return await interaction.followup.send(
+                "❌ البوت يحتاج إلى صلاحية Manage Channels لإنشاء روم الإعلان.",
+                ephemeral=True,
+            )
 
         name = self.cog.clean_name(str(self.room_name.value))
         overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
-            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
+            guild.default_role: discord.PermissionOverwrite(
+                view_channel=True, send_messages=False, read_message_history=True
+            ),
+            interaction.user: discord.PermissionOverwrite(
+                view_channel=True, send_messages=False, read_message_history=True
+            ),
             guild.me: discord.PermissionOverwrite(
-                view_channel=True, send_messages=True, manage_channels=True, manage_messages=True,
-                attach_files=True, embed_links=True, read_message_history=True,
+                view_channel=True,
+                send_messages=True,
+                manage_channels=True,
+                manage_messages=True,
+                attach_files=True,
+                embed_links=True,
+                read_message_history=True,
             ),
         }
         try:
             channel = await guild.create_text_channel(
-                name, category=None, overwrites=overwrites,
+                name,
+                category=None,
+                overwrites=overwrites,
                 reason=f"Ader advertising room for {interaction.user} created by {self.invoker_id}",
             )
         except (discord.Forbidden, discord.HTTPException):
-            return await interaction.followup.send("❌ تعذر إنشاء روم الإعلان. تأكد من صلاحيات البوت.", ephemeral=True)
+            return await interaction.followup.send(
+                "❌ تعذر إنشاء روم الإعلان. تأكد من صلاحيات البوت.",
+                ephemeral=True,
+            )
 
         try:
             await self.cog.db.execute(
@@ -80,20 +112,20 @@ class AdComposeModal(discord.ui.Modal, title="اكتب إعلانك"):
             )
 
             mention = "@everyone" if self.mention_type == "everyone" else "@here"
-            # The requested mention is always the final line of the advertisement.
             await channel.send(
                 f"{str(self.ad_text.value).rstrip()}\n\n{mention}",
                 allowed_mentions=discord.AllowedMentions(everyone=True),
             )
 
-            settings = await self.cog.db.fetchone("SELECT * FROM ad_settings_v2 WHERE guild_id=?", (guild.id,))
+            settings = await self.cog.db.fetchone(
+                "SELECT * FROM ad_settings_v2 WHERE guild_id=?", (guild.id,)
+            )
             if settings and str(settings["post_message"] or "").strip():
                 await channel.send(str(settings["post_message"]))
 
             if settings and int(settings["giveaway_enabled"] or 0):
                 await self.cog.start_configured_giveaway(guild, channel, settings)
 
-            # Image is intentionally sent last, after the advertisement, post-message and giveaway.
             if settings and settings["image_path"]:
                 path = Path(str(settings["image_path"]))
                 if path.exists():
@@ -102,7 +134,20 @@ class AdComposeModal(discord.ui.Modal, title="اكتب إعلانك"):
                     except (discord.HTTPException, OSError):
                         pass
 
-            await interaction.followup.send(f"✅ تم إنشاء روم الإعلان {channel.mention} ونشر الإعلان بنجاح.", ephemeral=True)
+            # Edit the second control message into the final success embed.
+            success_embed = discord.Embed(
+                description=f"تم عمل اعلان في روم {channel.mention} بنجاح ✅",
+                colour=discord.Colour.green(),
+            )
+            try:
+                control_message = await interaction.channel.fetch_message(self.control_message_id)
+                await control_message.edit(content=None, embed=success_embed, view=None)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                # The advertisement itself was created successfully even if the control message
+                # can no longer be edited.
+                pass
+
+            await interaction.followup.send("✅ تم نشر الإعلان بنجاح.", ephemeral=True)
         except Exception:
             try:
                 await channel.delete(reason="Ader advertising setup failed")
@@ -120,25 +165,64 @@ class MentionChoiceView(discord.ui.View):
         self.invoker_id = invoker_id
 
     async def _choose(self, interaction: discord.Interaction, mention_type: str):
+        # Only the Administrator who executed $اعلان may choose Everyone/Here.
         if interaction.user.id != self.invoker_id:
-            return await interaction.response.send_message("❌ غير صاحب أمر `$اعلان` هو المسموح له باختيار Everyone أو Here.", ephemeral=True)
+            return await interaction.response.send_message(
+                "❌ غير صاحب أمر `$اعلان` هو المسموح له باختيار Everyone أو Here.",
+                ephemeral=True,
+            )
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message(
+                "❌ يلزم Administrator لاستعمال هذا التحكم.",
+                ephemeral=True,
+            )
+
         await self.cog.db.execute(
             "INSERT INTO ad_pending(guild_id,target_id,invoker_id,mention_type,active,created_at) VALUES(?,?,?,?,1,?) "
             "ON CONFLICT(guild_id,target_id,invoker_id) DO UPDATE SET mention_type=excluded.mention_type,active=1,created_at=excluded.created_at",
             (self.guild_id, self.target_id, self.invoker_id, mention_type, time.time()),
         )
-        view = TargetComposeView(self.cog, self.guild_id, self.target_id, self.invoker_id, mention_type)
-        label = "@everyone" if mention_type == "everyone" else "@here"
+
+        # The original message is closed immediately after the Administrator chooses
+        # the mention type, exactly as requested.
         await interaction.response.edit_message(
-            content=f"**تم اختيار {label}**\n\n<@{self.target_id}>، اضغط الزر بالأسفل لكتابة إعلانك.",
-            view=view, allowed_mentions=discord.AllowedMentions(users=True),
+            content="تم منح اعلان الروم.",
+            embed=None,
+            view=None,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    @discord.ui.button(label="Everyone", emoji="🔴", style=discord.ButtonStyle.danger, custom_id="ader:ad:choose:everyone")
+        # A new message is created for the mentioned member only.
+        target_view = TargetComposeView(
+            self.cog,
+            self.guild_id,
+            self.target_id,
+            self.invoker_id,
+            mention_type,
+        )
+        target_message = await interaction.followup.send(
+            f"<@{self.target_id}>\nاضغط الزر بالأسفل لكتابة إعلانك.",
+            view=target_view,
+            allowed_mentions=discord.AllowedMentions(users=True),
+            wait=True,
+        )
+        target_view.control_message_id = target_message.id
+
+    @discord.ui.button(
+        label="Everyone",
+        emoji="🔴",
+        style=discord.ButtonStyle.danger,
+        custom_id="ader:ad:choose:everyone",
+    )
     async def everyone(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._choose(interaction, "everyone")
 
-    @discord.ui.button(label="Here", emoji="🟢", style=discord.ButtonStyle.success, custom_id="ader:ad:choose:here")
+    @discord.ui.button(
+        label="Here",
+        emoji="🟢",
+        style=discord.ButtonStyle.success,
+        custom_id="ader:ad:choose:here",
+    )
     async def here(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._choose(interaction, "here")
 
@@ -151,12 +235,33 @@ class TargetComposeView(discord.ui.View):
         self.target_id = target_id
         self.invoker_id = invoker_id
         self.mention_type = mention_type
+        self.control_message_id: int | None = None
 
-    @discord.ui.button(label="اكتب إعلانك", emoji="📝", style=discord.ButtonStyle.primary, custom_id="ader:ad:compose")
+    @discord.ui.button(
+        label="اكتب إعلانك",
+        emoji="📝",
+        style=discord.ButtonStyle.primary,
+        custom_id="ader:ad:compose",
+    )
     async def compose(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Only the member mentioned in $اعلان can open the advertisement modal.
         if interaction.user.id != self.target_id:
-            return await interaction.response.send_message("❌ هذا الزر مخصص للعضو الذي تم منشنه في أمر `$اعلان` فقط.", ephemeral=True)
-        await interaction.response.send_modal(AdComposeModal(self.cog, self.guild_id, self.target_id, self.invoker_id, self.mention_type))
+            return await interaction.response.send_message(
+                "❌ هذا الزر مخصص للعضو الذي تم منشنه في أمر `$اعلان` فقط.",
+                ephemeral=True,
+            )
+        if not self.control_message_id and interaction.message:
+            self.control_message_id = interaction.message.id
+        await interaction.response.send_modal(
+            AdComposeModal(
+                self.cog,
+                self.guild_id,
+                self.target_id,
+                self.invoker_id,
+                self.mention_type,
+                self.control_message_id or 0,
+            )
+        )
 
 
 class AdCommandControllerPatch(commands.Cog):
@@ -192,12 +297,20 @@ class AdCommandControllerPatch(commands.Cog):
             return
 
         async def callback(cog, ctx, member: discord.Member | None = None):
-            if not await cog.authorized(ctx.author):
-                return await ctx.reply("❌ هذا الأمر محمي. يلزم Administrator أو رتبة مسموح بها.", mention_author=False)
+            # $اعلان is Administrator-only. Do not use the configurable role list here.
+            if ctx.guild is None or not ctx.author.guild_permissions.administrator:
+                return await ctx.reply(
+                    "❌ هذا الأمر مخصص لمن لديهم صلاحية Administrator فقط.",
+                    mention_author=False,
+                )
             if member is None:
-                return await ctx.reply("❌ الاستعمال الصحيح: `$اعلان @user`", mention_author=False)
+                return await ctx.reply(
+                    "❌ الاستعمال الصحيح: `$اعلان @user`",
+                    mention_author=False,
+                )
             if member.bot:
                 return await ctx.reply("❌ لا يمكن إنشاء إعلان لبوت.", mention_author=False)
+
             await cog.db.execute(
                 "UPDATE ad_pending SET active=0 WHERE guild_id=? AND (target_id=? OR invoker_id=?)",
                 (ctx.guild.id, member.id, ctx.author.id),
