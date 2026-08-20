@@ -65,7 +65,6 @@ class DashboardServer(commands.Cog):
 
     @staticmethod
     def _resolve_host(cfg: dict) -> str:
-        # Public/NAT panel IPs are often not local container interfaces.
         host = str(os.getenv("DASHBOARD_HOST") or cfg.get("host") or "0.0.0.0").strip()
         return host or "0.0.0.0"
 
@@ -78,7 +77,7 @@ class DashboardServer(commands.Cog):
         await self._migrate_dashboard()
         try:
             import uvicorn
-            from web.dashboard_shell import create_app
+            from web.dashboard_runtime import create_app
         except Exception as exc:
             self.log.error("Dashboard dependencies are unavailable: %s", exc, exc_info=True)
             return
