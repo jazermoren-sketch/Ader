@@ -1,0 +1,1 @@
+The dashboard runtime refreshes live guild cache before loading overview statistics.
