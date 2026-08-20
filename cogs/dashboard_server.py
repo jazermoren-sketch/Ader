@@ -78,7 +78,7 @@ class DashboardServer(commands.Cog):
         await self._migrate_dashboard()
         try:
             import uvicorn
-            from web.api_v2 import create_app
+            from web.dashboard_shell import create_app
         except Exception as exc:
             self.log.error("Dashboard dependencies are unavailable: %s", exc, exc_info=True)
             return
