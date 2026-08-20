@@ -1,21 +1,61 @@
 """
 Permission checks and utilities for Logiq.
 
-Moderation slash commands are intentionally mapped to their minimum Discord
-permission.  Administrator inherits every Discord permission, so admins still
-pass every moderation check without making Administrator the requirement for
-all moderation actions.
+Permission checks must tolerate Discord interactions where the Member object is
+partially resolved. In that case ``Member.guild_permissions`` can raise while
+trying to resolve an uncached role, so interaction-level permissions are used
+first and the guild cache/API are used as safe fallbacks.
 """
+
+from __future__ import annotations
+
+from typing import Optional
 
 import discord
 from discord import app_commands
-from typing import Optional
+
+
+async def _get_interaction_permissions(
+    interaction: discord.Interaction,
+) -> Optional[discord.Permissions]:
+    """Return reliable permissions for a guild interaction without crashing.
+
+    Discord includes resolved permissions on application-command interactions.
+    Prefer those because they do not depend on the local Member role cache.
+    """
+    if interaction.guild is None:
+        return None
+
+    perms = getattr(interaction, "permissions", None)
+    if perms is not None:
+        return perms
+
+    member = interaction.user
+    try:
+        if isinstance(member, discord.Member):
+            return member.guild_permissions
+    except (AttributeError, TypeError):
+        pass
+
+    cached_member = interaction.guild.get_member(interaction.user.id)
+    if cached_member is not None:
+        try:
+            return cached_member.guild_permissions
+        except (AttributeError, TypeError):
+            pass
+
+    try:
+        fetched_member = await interaction.guild.fetch_member(interaction.user.id)
+        return fetched_member.guild_permissions
+    except (discord.HTTPException, AttributeError, TypeError):
+        return None
 
 
 def is_admin():
     """Check if user has Administrator permission."""
     async def predicate(interaction: discord.Interaction) -> bool:
-        return bool(interaction.guild and interaction.user.guild_permissions.administrator)
+        perms = await _get_interaction_permissions(interaction)
+        return bool(perms and perms.administrator)
     return app_commands.check(predicate)
 
 
@@ -35,17 +75,11 @@ _MODERATION_PERMISSIONS = {
 
 
 def is_moderator():
-    """Require the minimum Discord permission for each moderation command.
-
-    The decorator also sets Discord's native ``default_permissions`` metadata,
-    so the slash-command UI reflects the same permission requirement instead
-    of merely rejecting the command after a user invokes it.
-    """
+    """Require the minimum Discord permission for each moderation command."""
     async def predicate(interaction: discord.Interaction) -> bool:
-        if not interaction.guild:
+        perms = await _get_interaction_permissions(interaction)
+        if perms is None:
             return False
-
-        perms = interaction.user.guild_permissions
         if perms.administrator:
             return True
 
@@ -63,8 +97,6 @@ def is_moderator():
         if required:
             command = app_commands.default_permissions(**{required: True})(command)
         else:
-            # Never accidentally expose a future moderation command without a
-            # known permission.  The runtime predicate remains fail-closed too.
             command = app_commands.default_permissions(administrator=True)(command)
 
         return app_commands.check(predicate)(command)
@@ -84,7 +116,10 @@ def bot_has_permissions(**perms):
     async def predicate(interaction: discord.Interaction) -> bool:
         if not interaction.guild or not interaction.guild.me:
             return False
-        bot_perms = interaction.guild.me.guild_permissions
+        try:
+            bot_perms = interaction.guild.me.guild_permissions
+        except (AttributeError, TypeError):
+            return False
         return all(getattr(bot_perms, perm, False) for perm in perms)
     return app_commands.check(predicate)
 
@@ -131,7 +166,10 @@ class PermissionChecker:
         permission: str
     ) -> bool:
         """Check if member has a specific Discord permission."""
-        return getattr(member.guild_permissions, permission, False)
+        try:
+            return bool(getattr(member.guild_permissions, permission, False))
+        except (AttributeError, TypeError):
+            return False
 
     @staticmethod
     def get_missing_permissions(
@@ -141,5 +179,5 @@ class PermissionChecker:
         """Return required Discord permissions missing from a member."""
         return [
             perm for perm in required_permissions
-            if not getattr(member.guild_permissions, perm, False)
+            if not PermissionChecker.has_permission(member, perm)
         ]
