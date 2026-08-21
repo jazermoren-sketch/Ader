@@ -105,10 +105,15 @@ class Ader(commands.Bot):
             "tournament_delete.py",
             "ultimate_system.py",
             "command_sync_fix.py",
+            "official_shortcuts.py",
+            # Legacy advertisement patches. advertising_shop.py and
+            # ad_customization.py are now canonical and contain the complete flow.
+            "ad_command_controller_patch.py",
             "ad_settings_hotfix.py",
-            # Incomplete music implementation: it only queues text and does not
-            # actually start an audio source. It is excluded from the release
-            # until a real voice playback backend is shipped.
+            "ad_settings_v2.py",
+            "zzzz_runtime_repairs.py",
+            # Incomplete music implementation: it only queued text and did not
+            # actually start an audio source.
             "music.py",
             # Legacy dashboard launcher.
             "web_dashboard.py",
@@ -118,18 +123,9 @@ class Ader(commands.Bot):
             for p in directory.glob("*.py")
             if not (p.stem.startswith("_") or p.stem == "__init__" or p.name in disabled)
         ]
-        paths.sort(
-            key=lambda p: (
-                0 if p.stem == "advertising_shop" else 1 if p.stem == "ad_command_controller_patch" else 2,
-                p.stem,
-            )
-        )
+        paths.sort(key=lambda p: (0 if p.stem == "advertising_shop" else 1, p.stem))
         for path in paths:
             try:
-                if path.stem == "official_shortcuts":
-                    legacy = self.get_command("اعطي")
-                    if legacy is not None:
-                        self.remove_command(legacy.name)
                 if path.stem == "application_system_v4":
                     self.tree.remove_command("تقديم")
                 await self.load_extension(f"cogs.{path.stem}")
@@ -169,12 +165,7 @@ class Ader(commands.Bot):
             command = getattr(interaction, "command", None)
             if command is not None:
                 name = getattr(command, "qualified_name", None) or getattr(command, "name", "")
-                allowed, reason = await self._dashboard_allowed(
-                    interaction.guild.id,
-                    name,
-                    interaction.user,
-                    getattr(interaction.channel, "id", None),
-                )
+                allowed, reason = await self._dashboard_allowed(interaction.guild.id, name, interaction.user, getattr(interaction.channel, "id", None))
                 if not allowed:
                     await self._dashboard_deny(interaction, reason)
                     return
@@ -222,10 +213,7 @@ class Ader(commands.Bot):
                     total = amount + fee
                     balance = await self.db.get_balance(message.author.id)
                     if balance < total:
-                        await message.channel.send(
-                            f"❌ رصيدك غير كافٍ. تحتاج **{total:,} ANOCoin**، ورصيدك الحالي **{balance:,} ANOCoin**.",
-                            delete_after=10,
-                        )
+                        await message.channel.send(f"❌ رصيدك غير كافٍ. تحتاج **{total:,} ANOCoin**، ورصيدك الحالي **{balance:,} ANOCoin**.", delete_after=10)
                         return
                     confirmed = await economy._confirm(message.channel, message.author, message.guild.id, "التحويل")
                     if not confirmed:
@@ -237,12 +225,7 @@ class Ader(commands.Bot):
         await self.process_commands(message)
 
     async def on_ready(self):
-        types = {
-            "playing": discord.ActivityType.playing,
-            "watching": discord.ActivityType.watching,
-            "listening": discord.ActivityType.listening,
-            "streaming": discord.ActivityType.streaming,
-        }
+        types = {"playing": discord.ActivityType.playing, "watching": discord.ActivityType.watching, "listening": discord.ActivityType.listening, "streaming": discord.ActivityType.streaming}
         typ = self.config.get("bot", {}).get("activity_type", "watching")
         text = self.config.get("bot", {}).get("activity", "مجتمعك")
         await self.change_presence(activity=discord.Activity(type=types.get(typ, discord.ActivityType.watching), name=text))
