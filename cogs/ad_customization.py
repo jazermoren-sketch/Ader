@@ -76,13 +76,7 @@ class GiveawaySettingsModal(discord.ui.Modal, title="إعدادات القيف �
         await self.cog.db.execute(
             """INSERT INTO ad_settings_v2(guild_id,post_message,giveaway_enabled,giveaway_amount,giveaway_duration,giveaway_sponsor_id,image_path,updated_at,required_guild_id)
             VALUES(?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(guild_id) DO UPDATE SET
-                giveaway_enabled=excluded.giveaway_enabled,
-                giveaway_amount=excluded.giveaway_amount,
-                giveaway_duration=excluded.giveaway_duration,
-                giveaway_sponsor_id=excluded.giveaway_sponsor_id,
-                updated_at=excluded.updated_at,
-                required_guild_id=excluded.required_guild_id""",
+            ON CONFLICT(guild_id) DO UPDATE SET giveaway_enabled=excluded.giveaway_enabled,giveaway_amount=excluded.giveaway_amount,giveaway_duration=excluded.giveaway_duration,giveaway_sponsor_id=excluded.giveaway_sponsor_id,updated_at=excluded.updated_at,required_guild_id=excluded.required_guild_id""",
             (interaction.guild.id, "", enabled, value, duration, interaction.user.id, None, time.time(), server_id),
         )
         await interaction.response.send_message("✅ تم حفظ إعدادات القيف أواي وشرط دخول السيرفر.", ephemeral=True)
@@ -108,14 +102,16 @@ class MessageModal(discord.ui.Modal):
         content = strip_mentions(str(self.content_input.value))
         if not name or not content:
             return await interaction.response.send_message("❌ الرسالة غير صالحة.", ephemeral=True)
+        key = (interaction.guild_id or 0, interaction.user.id)
+        event = self.cog.selected_event.get(key, "after_ad")
         if self.message_id is None:
             await self.cog.db.execute(
                 "INSERT INTO ad_custom_messages(guild_id,name,content,event,reply_to,reply_target,enabled,position,created_at,last_message_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (interaction.guild.id, name, content, "after_ad", None, "ad", 1, await self.cog.next_position(interaction.guild.id), time.time(), None),
+                (interaction.guild.id, name, content, event, None, "ad", 1, await self.cog.next_position(interaction.guild.id), time.time(), None),
             )
         else:
-            await self.cog.db.execute("UPDATE ad_custom_messages SET name=?,content=? WHERE id=? AND guild_id=?", (name, content, self.message_id, interaction.guild.id))
-        await interaction.response.send_message("✅ تم حفظ الرسالة.", ephemeral=True)
+            await self.cog.db.execute("UPDATE ad_custom_messages SET name=?,content=?,event=? WHERE id=? AND guild_id=?", (name, content, event, self.message_id, interaction.guild.id))
+        await interaction.response.send_message(f"✅ تم حفظ الرسالة في توقيت **{EVENTS.get(event, event)}**.", ephemeral=True)
 
 
 class EventSelect(discord.ui.Select):
@@ -167,8 +163,34 @@ class ReplyTargetSelect(discord.ui.Select):
         if not mid:
             return await interaction.response.send_message("❌ اختار الرسالة الحالية أولاً.", ephemeral=True)
         target = self.values[0]
+        if target == f"custom:{mid}":
+            return await interaction.response.send_message("❌ ما يمكنش الرسالة تدير Reply لنفسها.", ephemeral=True)
         await self.cog.db.execute("UPDATE ad_custom_messages SET reply_target=? WHERE id=? AND guild_id=?", (target, mid, interaction.guild.id))
         await interaction.response.send_message("✅ تم حفظ الـReply بلا ما تحتاج تدخل أي ID.", ephemeral=True)
+
+
+class RoleSelect(discord.ui.RoleSelect):
+    def __init__(self, cog):
+        super().__init__(placeholder="اختر رتبة مسموح لها بـ$اعلان", min_values=1, max_values=1, row=3)
+        self.cog = cog
+
+    async def callback(self, interaction):
+        if not self.cog.is_admin(interaction):
+            return await interaction.response.send_message("❌ تحتاج إلى Manage Server أو Administrator.", ephemeral=True)
+        row = await self.cog.db.fetchone("SELECT allowed_roles FROM ad_settings WHERE guild_id=?", (interaction.guild.id,))
+        try:
+            roles = {int(x) for x in json.loads(row["allowed_roles"] or "[]")} if row else set()
+        except Exception:
+            roles = set()
+        role_id = self.values[0].id
+        if role_id in roles:
+            roles.remove(role_id)
+            text = "تمت إزالة الرتبة من المسموح لهم"
+        else:
+            roles.add(role_id)
+            text = "تمت إضافة الرتبة إلى المسموح لهم"
+        await self.cog.db.execute("INSERT INTO ad_settings(guild_id,allowed_roles) VALUES(?,?) ON CONFLICT(guild_id) DO UPDATE SET allowed_roles=excluded.allowed_roles", (interaction.guild.id, json.dumps(sorted(roles))))
+        await interaction.response.send_message(f"✅ {text}.", ephemeral=True)
 
 
 class SettingsView(discord.ui.View):
@@ -227,6 +249,8 @@ class SettingsView(discord.ui.View):
             target = await self.cog.bot.wait_for("message", timeout=60, check=lambda m: m.author.id == interaction.user.id and m.channel.id == interaction.channel.id)
         except asyncio.TimeoutError:
             return await interaction.followup.send("⌛ سالات المهلة.", ephemeral=True)
+        if target.id == mid:
+            return await interaction.followup.send("❌ ما يمكنش الرسالة تدير Reply لنفسها.", ephemeral=True)
         await self.cog.db.execute("UPDATE ad_custom_messages SET reply_target=? WHERE id=? AND guild_id=?", (f"message:{target.id}", mid, interaction.guild.id))
         await interaction.followup.send("✅ تم تحديد الرسالة/Attachment كهدف للـReply بلا ID.", ephemeral=True)
 
@@ -235,30 +259,6 @@ class SettingsView(discord.ui.View):
         if await self.guard(interaction):
             row = await self.cog.db.fetchone("SELECT * FROM ad_settings_v2 WHERE guild_id=?", (interaction.guild.id,))
             await interaction.response.send_modal(GiveawaySettingsModal(self.cog, row))
-
-
-class RoleSelect(discord.ui.RoleSelect):
-    def __init__(self, cog):
-        super().__init__(placeholder="اختر رتبة مسموح لها بـ$اعلان", min_values=1, max_values=1, row=3)
-        self.cog = cog
-
-    async def callback(self, interaction):
-        if not self.cog.is_admin(interaction):
-            return await interaction.response.send_message("❌ تحتاج إلى Manage Server أو Administrator.", ephemeral=True)
-        row = await self.cog.db.fetchone("SELECT allowed_roles FROM ad_settings WHERE guild_id=?", (interaction.guild.id,))
-        try:
-            roles = {int(x) for x in json.loads(row["allowed_roles"] or "[]")} if row else set()
-        except Exception:
-            roles = set()
-        role_id = self.values[0].id
-        if role_id in roles:
-            roles.remove(role_id)
-            text = "تمت إزالة الرتبة من المسموح لهم"
-        else:
-            roles.add(role_id)
-            text = "تمت إضافة الرتبة إلى المسموح لهم"
-        await self.cog.db.execute("INSERT INTO ad_settings(guild_id,allowed_roles) VALUES(?,?) ON CONFLICT(guild_id) DO UPDATE SET allowed_roles=excluded.allowed_roles", (interaction.guild.id, json.dumps(sorted(roles))))
-        await interaction.response.send_message(f"✅ {text}.", ephemeral=True)
 
 
 class AdCustomization(commands.Cog):
