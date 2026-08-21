@@ -1,91 +1,78 @@
-"""
-Unit tests for database manager
-"""
+"""Tests for Ader's current SQLite database manager."""
 
-import pytest
 import asyncio
+from pathlib import Path
+
 from database.db_manager import DatabaseManager
-from database.models import User, Guild
 
 
-@pytest.fixture
-async def db_manager():
-    """Create database manager for testing"""
-    db = DatabaseManager("mongodb://localhost:27017", "Logiq_test", pool_size=5)
-    await db.connect()
-    yield db
-    await db.disconnect()
+def run(coro):
+    return asyncio.run(coro)
 
 
-@pytest.mark.asyncio
-async def test_user_creation(db_manager):
-    """Test user creation"""
-    user_id = 123456789
-    guild_id = 987654321
+def test_user_creation_and_retrieval(tmp_path: Path):
+    async def scenario():
+        db = DatabaseManager(str(tmp_path / "ader.sqlite3"))
+        await db.connect()
+        try:
+            user = await db.create_user(123456789, 987654321)
+            assert user["user_id"] == 123456789
+            assert user["guild_id"] == 987654321
+            assert user["balance"] == 0
+            assert user["xp"] == 0
+            assert user["level"] == 0
 
-    user = await db_manager.create_user(user_id, guild_id)
-    assert user['user_id'] == user_id
-    assert user['guild_id'] == guild_id
-    assert user['balance'] == 1000
-    assert user['xp'] == 0
-    assert user['level'] == 0
+            retrieved = await db.get_user(123456789, 987654321)
+            assert retrieved is not None
+            assert retrieved["user_id"] == 123456789
+        finally:
+            await db.disconnect()
 
-
-@pytest.mark.asyncio
-async def test_user_retrieval(db_manager):
-    """Test user retrieval"""
-    user_id = 123456789
-    guild_id = 987654321
-
-    await db_manager.create_user(user_id, guild_id)
-    retrieved = await db_manager.get_user(user_id, guild_id)
-
-    assert retrieved is not None
-    assert retrieved['user_id'] == user_id
+    run(scenario())
 
 
-@pytest.mark.asyncio
-async def test_balance_operations(db_manager):
-    """Test balance add/remove"""
-    user_id = 123456789
-    guild_id = 987654321
+def test_balance_operations(tmp_path: Path):
+    async def scenario():
+        db = DatabaseManager(str(tmp_path / "ader.sqlite3"))
+        await db.connect()
+        try:
+            await db.create_user(123, 456)
+            assert await db.add_balance(123, 456, 500)
+            assert await db.get_balance(123) == 500
+            assert await db.remove_balance(123, 456, 300)
+            assert await db.get_balance(123) == 200
+            assert not await db.remove_balance(123, 456, 999)
+        finally:
+            await db.disconnect()
 
-    await db_manager.create_user(user_id, guild_id)
-
-    # Add balance
-    await db_manager.add_balance(user_id, guild_id, 500)
-    user = await db_manager.get_user(user_id, guild_id)
-    assert user['balance'] == 1500
-
-    # Remove balance
-    await db_manager.remove_balance(user_id, guild_id, 300)
-    user = await db_manager.get_user(user_id, guild_id)
-    assert user['balance'] == 1200
+    run(scenario())
 
 
-@pytest.mark.asyncio
-async def test_guild_creation(db_manager):
-    """Test guild creation"""
-    guild_id = 987654321
+def test_guild_creation(tmp_path: Path):
+    async def scenario():
+        db = DatabaseManager(str(tmp_path / "ader.sqlite3"))
+        await db.connect()
+        try:
+            guild = await db.create_guild(987654321)
+            assert guild["guild_id"] == 987654321
+            assert guild["modules"] == {}
+        finally:
+            await db.disconnect()
 
-    guild = await db_manager.create_guild(guild_id)
-    assert guild['guild_id'] == guild_id
-    assert guild['prefix'] == "/"
-
-
-@pytest.mark.asyncio
-async def test_leaderboard(db_manager):
-    """Test leaderboard retrieval"""
-    guild_id = 987654321
-
-    # Create multiple users with different XP
-    for i in range(5):
-        await db_manager.create_user(100 + i, guild_id, {"xp": (i + 1) * 100})
-
-    leaderboard = await db_manager.get_leaderboard(guild_id, limit=5)
-    assert len(leaderboard) == 5
-    assert leaderboard[0]['xp'] > leaderboard[-1]['xp']  # Should be sorted
+    run(scenario())
 
 
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])
+def test_leaderboard(tmp_path: Path):
+    async def scenario():
+        db = DatabaseManager(str(tmp_path / "ader.sqlite3"))
+        await db.connect()
+        try:
+            for i in range(5):
+                await db.create_user(100 + i, 987654321, {"xp": (i + 1) * 100})
+            leaderboard = await db.get_leaderboard(987654321, limit=5)
+            assert len(leaderboard) == 5
+            assert leaderboard[0]["xp"] > leaderboard[-1]["xp"]
+        finally:
+            await db.disconnect()
+
+    run(scenario())
