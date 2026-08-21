@@ -7,12 +7,7 @@ from discord.ext import commands
 
 
 class ReplyTargetModal(discord.ui.Modal, title="تحديد رسالة الـReply"):
-    message_id = discord.ui.TextInput(
-        label="ID ديال الرسالة",
-        placeholder="مثال: 123456789012345678",
-        max_length=30,
-        required=True,
-    )
+    message_id = discord.ui.TextInput(label="ID ديال الرسالة", placeholder="123456789012345678", max_length=30, required=True)
 
     def __init__(self, cog, custom_message_id: int):
         super().__init__()
@@ -34,9 +29,7 @@ class ReplyTargetModal(discord.ui.Modal, title="تحديد رسالة الـRepl
             "UPDATE ad_custom_messages SET reply_to=? WHERE id=? AND guild_id=?",
             (str(target.id), self.custom_message_id, interaction.guild.id),
         )
-        await interaction.response.send_message(
-            f"✅ هاد الرسالة غادي تكون Reply للرسالة `{target.id}`.", ephemeral=True
-        )
+        await interaction.response.send_message(f"✅ تم تعيين Reply للرسالة `{target.id}`.", ephemeral=True)
 
 
 class ReplyTargetButton(discord.ui.Button):
@@ -117,35 +110,21 @@ class RuntimeRepairs(commands.Cog):
             import cogs.shortcuts as shortcuts_module
         except Exception:
             return
-
-        def permission(interaction):
-            return bool(
-                interaction.guild
-                and (
-                    interaction.user.guild_permissions.administrator
-                    or interaction.user.guild_permissions.manage_guild
-                )
-            )
-
+        permission = lambda interaction: bool(
+            interaction.guild
+            and (interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild)
+        )
         shortcuts_module.has_server_manage_permission = permission
-        cog = self.bot.get_cog("Shortcuts")
-        if cog is None:
-            return
         command = next((c for c in self.bot.tree.get_commands() if getattr(c, "name", "") == "اختصارات"), None)
         if command is None:
             return
-
+        cog = self.bot.get_cog("Shortcuts")
+        if cog is None:
+            return
         async def shortcuts_callback(cog_obj, interaction: discord.Interaction, اخفاء: bool = False):
-            if not interaction.guild:
-                return await interaction.response.send_message("❌ هذا الأمر خاص بالسيرفرات.", ephemeral=True)
             if not permission(interaction):
                 return await interaction.response.send_message("❌ تحتاج إلى Manage Server أو Administrator.", ephemeral=True)
-            await interaction.response.send_message(
-                embed=cog_obj.selector_embed(),
-                view=shortcuts_module.ShortcutView(cog_obj, اخفاء),
-                ephemeral=اخفاء,
-            )
-
+            await interaction.response.send_message(embed=cog_obj.selector_embed(), view=shortcuts_module.ShortcutView(cog_obj, اخفاء), ephemeral=اخفاء)
         command.callback = shortcuts_callback
 
     async def _patch_giveaways(self):
@@ -157,28 +136,22 @@ class RuntimeRepairs(commands.Cog):
         if ad_shop is None:
             return
 
-        # Make the legacy ad-room Giveaway button emoji-only. Existing messages are
-        # repaired in-place and new views automatically use the same appearance.
-        original_view_cls = advertising_shop.GiveawayView
-        if not getattr(original_view_cls, "_ader_emoji_only", False):
-            original_init = original_view_cls.__init__
+        await self.db.execute("ALTER TABLE ad_giveaways ADD COLUMN message_id INTEGER") if not await self._has_column("ad_giveaways", "message_id") else None
+
+        view_cls = advertising_shop.GiveawayView
+        if not getattr(view_cls, "_ader_emoji_only", False):
+            original_init = view_cls.__init__
             def patched_init(view_self, cog, giveaway_id):
                 original_init(view_self, cog, giveaway_id)
                 if view_self.children:
                     button = view_self.children[0]
                     button.label = None
                     button.emoji = "🎉"
-            original_view_cls.__init__ = patched_init
-            original_view_cls._ader_emoji_only = True
+            view_cls.__init__ = patched_init
+            view_cls._ader_emoji_only = True
 
-        # Remove the old single-active-giveaway restriction by replacing the
-        # creation method with an equivalent implementation that has no global
-        # active-giveaway guard.
         async def create_giveaway(cog, guild, owner, channel_id, amount, duration):
-            row = await cog.db.fetchone(
-                "SELECT * FROM ad_rooms WHERE guild_id=? AND channel_id=? AND owner_id=? AND active=1",
-                (guild.id, channel_id, owner.id),
-            )
+            row = await cog.db.fetchone("SELECT * FROM ad_rooms WHERE guild_id=? AND channel_id=? AND owner_id=? AND active=1", (guild.id, channel_id, owner.id))
             if not row:
                 return False, "❌ هذا ليس رومك الإعلاني."
             if amount <= 0 or duration <= 0:
@@ -188,30 +161,22 @@ class RuntimeRepairs(commands.Cog):
             if not await cog.db.remove_balance(owner.id, guild.id, amount):
                 return False, "❌ تعذر خصم المبلغ."
             ends = time.time() + duration
-            cur = await cog.db.execute(
-                "INSERT INTO ad_giveaways(guild_id,channel_id,owner_id,amount,ends_at) VALUES(?,?,?,?,?)",
-                (guild.id, channel_id, owner.id, amount, ends),
-            )
+            cur = await cog.db.execute("INSERT INTO ad_giveaways(guild_id,channel_id,owner_id,amount,ends_at) VALUES(?,?,?,?,?)", (guild.id, channel_id, owner.id, amount, ends))
             gid = int(cur.lastrowid)
             channel = guild.get_channel(channel_id)
             try:
-                embed = discord.Embed(
-                    title="🎁 قيف أواي ANOCoin",
-                    description=f"الجائزة: **{amount:,} ANOCoin**\nينتهي: <t:{int(ends)}:R>\nاضغط على 🎉 للمشاركة.",
-                    colour=discord.Colour.green(),
-                )
-                message = await channel.send(embed=embed, view=advertising_shop.GiveawayView(cog, gid))
+                embed = discord.Embed(title="🎁 قيف أواي ANOCoin", description=f"الجائزة: **{amount:,} ANOCoin**\nينتهي: <t:{int(ends)}:R>\nاضغط على 🎉 للمشاركة.", colour=discord.Colour.green())
+                message = await channel.send(embed=embed, view=view_cls(cog, gid))
                 await cog.db.execute("UPDATE ad_giveaways SET message_id=? WHERE id=?", (message.id, gid))
             except discord.HTTPException:
                 await cog.db.execute("UPDATE ad_giveaways SET ended=1 WHERE id=?", (gid,))
                 await cog.db.add_balance(owner.id, guild.id, amount)
                 return False, "❌ تعذر نشر القيف أواي؛ تمت إعادة المبلغ."
-            self.bot.add_view(advertising_shop.GiveawayView(cog, gid))
+            self.bot.add_view(view_cls(cog, gid))
             return True, f"✅ تم إنشاء القيف أواي **#{gid}** وخصم **{amount:,} ANOCoin** من رصيدك."
 
         ad_shop.create_giveaway = create_giveaway.__get__(ad_shop, ad_shop.__class__)
 
-        # Repair existing active giveaway messages to the emoji-only view.
         try:
             rows = await self.db.fetchall("SELECT id,channel_id,message_id FROM ad_giveaways WHERE ended=0")
             for row in rows:
@@ -223,36 +188,33 @@ class RuntimeRepairs(commands.Cog):
                     continue
                 try:
                     message = await channel.fetch_message(message_id)
-                    await message.edit(view=advertising_shop.GiveawayView(ad_shop, int(row["id"])))
+                    await message.edit(view=view_cls(ad_shop, int(row["id"])))
                 except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                     pass
         except Exception as exc:
             self.bot.logger.error("Giveaway UI repair failed: %s", exc, exc_info=True)
 
+    async def _has_column(self, table: str, column: str) -> bool:
+        rows = await self.db.fetchall(f"PRAGMA table_info({table})")
+        return any(str(row[1]) == column for row in rows)
+
     async def _patch_custom_message_reply(self):
         try:
             import cogs.ad_customization as customization
+            from cogs.ad_command_controller_patch import AdComposeModal
         except Exception:
             return
-
         cog = self.bot.get_cog("AdCustomization")
+        ad_shop = self.bot.get_cog("AdvertisingShop")
         if cog is None:
             return
 
-        # Reply permissions: Manage Server and Administrator are equivalent here.
-        original_is_admin = getattr(cog, "is_admin", None)
-        def is_admin(interaction):
-            return bool(
-                interaction.guild
-                and (
-                    interaction.user.guild_permissions.administrator
-                    or interaction.user.guild_permissions.manage_guild
-                )
-            )
-        if original_is_admin:
-            cog.is_admin = is_admin
+        await self.db.execute("ALTER TABLE ad_custom_messages ADD COLUMN reply_to TEXT") if not await self._has_column("ad_custom_messages", "reply_to") else None
 
-        # Add a Reply-by-message-ID control to the existing customization panel.
+        cog.is_admin = lambda interaction: bool(
+            interaction.guild and (interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild)
+        )
+
         original_view_init = customization.SettingsView.__init__
         if not getattr(customization.SettingsView, "_ader_reply_button", False):
             def view_init(view_self, cog_obj, rows):
@@ -261,17 +223,45 @@ class RuntimeRepairs(commands.Cog):
             customization.SettingsView.__init__ = view_init
             customization.SettingsView._ader_reply_button = True
 
-        # Convert stored custom-message reply_to values into actual Discord replies
-        # immediately after an advertisement is posted. Any Discord message ID works,
-        # including a Giveaway message or a message carrying an attachment/image.
-        original_submit = customization.MessageModal.on_submit
-        if not getattr(customization.MessageModal, "_ader_reply_permission", False):
-            async def message_submit(modal_self, interaction):
-                if not is_admin(interaction):
-                    return await interaction.response.send_message("❌ تحتاج إلى Manage Server أو Administrator.", ephemeral=True)
+        original_submit = AdComposeModal.on_submit
+        if not getattr(AdComposeModal, "_ader_custom_messages", False):
+            async def ad_submit(modal_self, interaction):
                 await original_submit(modal_self, interaction)
-            customization.MessageModal.on_submit = message_submit
-            customization.MessageModal._ader_reply_permission = True
+                if not ad_shop or not interaction.guild:
+                    return
+                room = await self.db.fetchone(
+                    "SELECT channel_id FROM ad_rooms WHERE guild_id=? AND owner_id=? AND active=1 ORDER BY channel_id DESC LIMIT 1",
+                    (interaction.guild.id, modal_self.target_id),
+                )
+                if not room:
+                    return
+                channel = interaction.guild.get_channel(int(room["channel_id"]))
+                if channel is None:
+                    return
+                rows = await self.db.fetchall(
+                    "SELECT * FROM ad_custom_messages WHERE guild_id=? AND enabled=1 ORDER BY position,id",
+                    (interaction.guild.id,),
+                )
+                for row in rows:
+                    if str(row["event"] or "after_ad") != "after_ad":
+                        continue
+                    content = str(row["content"] or "").strip()
+                    if not content:
+                        continue
+                    reference = None
+                    raw_target = str(row["reply_to"] or "").strip()
+                    if raw_target.isdigit():
+                        try:
+                            target = await channel.fetch_message(int(raw_target))
+                            reference = discord.MessageReference(message_id=target.id, channel_id=channel.id, guild_id=interaction.guild.id, fail_if_not_exists=False)
+                        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                            reference = None
+                    try:
+                        await channel.send(content, reference=reference, allowed_mentions=discord.AllowedMentions.none())
+                    except discord.HTTPException:
+                        continue
+            AdComposeModal.on_submit = ad_submit
+            AdComposeModal._ader_custom_messages = True
 
 
 async def setup(bot: commands.Bot):
