@@ -1,34 +1,28 @@
-"""Early compatibility repairs for legacy Ader cogs.
-
-This module loads before the feature cogs and keeps older call sites compatible
-with the current DatabaseManager and BotLogger APIs.
-"""
+"""Early compatibility repairs for legacy Ader cogs."""
 from __future__ import annotations
 
 import json
 import time
 import traceback
 
+from discord.ext import commands
+
 from database.db_manager import DatabaseManager
 from utils.logger import BotLogger
 
 
 async def _get_analytics(self, guild_id=None, limit=100, event_type=None, **kwargs):
-    """Backward-compatible analytics reader used by legacy dashboard cogs."""
     try:
         limit = max(1, min(int(limit or 100), 1000))
     except (TypeError, ValueError):
         limit = 100
-
-    clauses = []
-    params = []
+    clauses, params = [], []
     if guild_id is not None:
         clauses.append("guild_id=?")
         params.append(int(guild_id))
     if event_type:
         clauses.append("type=?")
         params.append(str(event_type))
-
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = await self.fetchall(
         f"SELECT id,guild_id,type,timestamp,data FROM analytics{where} ORDER BY timestamp DESC LIMIT ?",
@@ -37,9 +31,8 @@ async def _get_analytics(self, guild_id=None, limit=100, event_type=None, **kwar
     result = []
     for row in rows:
         item = dict(row)
-        raw = item.get("data", "{}")
         try:
-            item["data"] = json.loads(raw or "{}")
+            item["data"] = json.loads(item.get("data") or "{}")
         except (TypeError, json.JSONDecodeError):
             item["data"] = {}
         result.append(item)
@@ -54,7 +47,6 @@ async def _record_analytics(self, guild_id, event_type, data=None, **kwargs):
 
 
 def _safe_error(self, message, *args, exc_info=False, **kwargs):
-    """Accept both old and new BotLogger.error calling conventions."""
     if args:
         first = args[0]
         if isinstance(first, BaseException):
@@ -76,7 +68,7 @@ def _safe_critical(self, message, *args, exc_info=False, **kwargs):
     self.logger.critical(str(message), exc_info=exc_info, **kwargs)
 
 
-class CompatibilityRepairs:
+class CompatibilityRepairs(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
@@ -85,9 +77,6 @@ class CompatibilityRepairs:
         DatabaseManager.record_analytics = _record_analytics
         BotLogger.error = _safe_error
         BotLogger.critical = _safe_critical
-
-        tree = self.bot.tree
-        previous = getattr(tree, "on_error", None)
 
         async def detailed_tree_error(interaction, error):
             original = getattr(error, "original", error)
@@ -103,7 +92,7 @@ class CompatibilityRepairs:
             except Exception:
                 pass
 
-        tree.on_error = detailed_tree_error
+        self.bot.tree.on_error = detailed_tree_error
 
 
 async def setup(bot):
