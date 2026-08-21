@@ -93,11 +93,9 @@ class Ader(commands.Bot):
         directory = Path(__file__).parent / "cogs"
         loaded = 0
         disabled = {
-            # Legacy application implementations; v4 is canonical.
             "application_system.py",
             "application_system_v2.py",
             "application_system_v3.py",
-            # Legacy duplicate implementations.
             "leveling.py",
             "tickets.py",
             "teams.py",
@@ -106,24 +104,20 @@ class Ader(commands.Bot):
             "ultimate_system.py",
             "command_sync_fix.py",
             "official_shortcuts.py",
-            # Legacy advertisement patches. advertising_shop.py and
-            # ad_customization.py are now canonical and contain the complete flow.
             "ad_command_controller_patch.py",
             "ad_settings_hotfix.py",
             "ad_settings_v2.py",
             "zzzz_runtime_repairs.py",
-            # Incomplete music implementation: it only queued text and did not
-            # actually start an audio source.
             "music.py",
-            # Legacy dashboard launcher.
             "web_dashboard.py",
         }
         paths = [
-            p
-            for p in directory.glob("*.py")
+            p for p in directory.glob("*.py")
             if not (p.stem.startswith("_") or p.stem == "__init__" or p.name in disabled)
         ]
-        paths.sort(key=lambda p: (0 if p.stem == "advertising_shop" else 1, p.stem))
+        # Shop must be loaded before AdvertisingShop because the latter wraps
+        # Shop._purchase to deliver advertising-room products.
+        paths.sort(key=lambda p: (0 if p.stem == "shop" else 1 if p.stem == "advertising_shop" else 2, p.stem))
         for path in paths:
             try:
                 if path.stem == "application_system_v4":
