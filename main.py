@@ -92,25 +92,25 @@ class Ader(commands.Bot):
     async def load_cogs(self):
         directory = Path(__file__).parent / "cogs"
         loaded = 0
-        # Release build: load one canonical implementation per subsystem.
-        # The excluded files are old versions, hotfix layers or duplicate
-        # implementations that previously caused command collisions and
-        # application-command errors.
         disabled = {
+            # Legacy application implementations; v4 is canonical.
             "application_system.py",
             "application_system_v2.py",
             "application_system_v3.py",
+            # Legacy duplicate implementations.
             "leveling.py",
             "tickets.py",
-            "tournament_delete.py",
             "teams.py",
+            "tournaments.py",
+            "tournament_delete.py",
             "ultimate_system.py",
             "command_sync_fix.py",
             "ad_settings_hotfix.py",
-            # Legacy dashboard launcher. dashboard_server.py is now the single
-            # canonical dashboard server. Loading both creates two Uvicorn
-            # instances competing for the same port and can leave the public
-            # dashboard unavailable/blank after a restart.
+            # Incomplete music implementation: it only queues text and does not
+            # actually start an audio source. It is excluded from the release
+            # until a real voice playback backend is shipped.
+            "music.py",
+            # Legacy dashboard launcher.
             "web_dashboard.py",
         }
         paths = [
@@ -118,9 +118,6 @@ class Ader(commands.Bot):
             for p in directory.glob("*.py")
             if not (p.stem.startswith("_") or p.stem == "__init__" or p.name in disabled)
         ]
-        # AdvertisingShop owns the $اعلان command. The controller depends on
-        # that cog, so force this dependency order instead of relying on the
-        # filesystem/alphabetical order.
         paths.sort(
             key=lambda p: (
                 0 if p.stem == "advertising_shop" else 1 if p.stem == "ad_command_controller_patch" else 2,
