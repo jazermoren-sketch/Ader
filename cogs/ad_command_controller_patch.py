@@ -134,17 +134,15 @@ class AdComposeModal(discord.ui.Modal, title="اكتب إعلانك"):
                     except (discord.HTTPException, OSError):
                         pass
 
-            # Edit the second control message into the final success embed.
+            # Replace the temporary target-control message with a clean success embed.
             success_embed = discord.Embed(
-                description=f"تم عمل اعلان في روم {channel.mention} بنجاح ✅",
+                description=f"**تم نشر اعلانك في روم {channel.mention} ✅**",
                 colour=discord.Colour.green(),
             )
             try:
                 control_message = await interaction.channel.fetch_message(self.control_message_id)
-                await control_message.edit(content=None, embed=success_embed, view=None)
+                await control_message.edit(content=None, embed=success_embed, view=None, attachments=[])
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                # The advertisement itself was created successfully even if the control message
-                # can no longer be edited.
                 pass
 
             await interaction.followup.send("✅ تم نشر الإعلان بنجاح.", ephemeral=True)
@@ -165,7 +163,6 @@ class MentionChoiceView(discord.ui.View):
         self.invoker_id = invoker_id
 
     async def _choose(self, interaction: discord.Interaction, mention_type: str):
-        # Only the Administrator who executed $اعلان may choose Everyone/Here.
         if interaction.user.id != self.invoker_id:
             return await interaction.response.send_message(
                 "❌ غير صاحب أمر `$اعلان` هو المسموح له باختيار Everyone أو Here.",
@@ -183,8 +180,6 @@ class MentionChoiceView(discord.ui.View):
             (self.guild_id, self.target_id, self.invoker_id, mention_type, time.time()),
         )
 
-        # The original message is closed immediately after the Administrator chooses
-        # the mention type, exactly as requested.
         await interaction.response.edit_message(
             content="تم منح اعلان الروم.",
             embed=None,
@@ -192,7 +187,6 @@ class MentionChoiceView(discord.ui.View):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-        # A new message is created for the mentioned member only.
         target_view = TargetComposeView(
             self.cog,
             self.guild_id,
@@ -229,7 +223,7 @@ class MentionChoiceView(discord.ui.View):
 
 class TargetComposeView(discord.ui.View):
     def __init__(self, cog, guild_id: int, target_id: int, invoker_id: int, mention_type: str):
-        super().__init__(timeout=120)
+        super().__init__(timeout=600)
         self.cog = cog
         self.guild_id = guild_id
         self.target_id = target_id
@@ -244,13 +238,13 @@ class TargetComposeView(discord.ui.View):
         custom_id="ader:ad:compose",
     )
     async def compose(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Only the member mentioned in $اعلان can open the advertisement modal.
+        # Authorization is checked against the member explicitly mentioned in $اعلان.
         if interaction.user.id != self.target_id:
             return await interaction.response.send_message(
                 "❌ هذا الزر مخصص للعضو الذي تم منشنه في أمر `$اعلان` فقط.",
                 ephemeral=True,
             )
-        if not self.control_message_id and interaction.message:
+        if interaction.message:
             self.control_message_id = interaction.message.id
         await interaction.response.send_modal(
             AdComposeModal(
@@ -287,17 +281,16 @@ class AdCommandControllerPatch(commands.Cog):
         )
         self.shop = self.bot.get_cog("AdvertisingShop")
         if not self.shop:
-            return
+            raise RuntimeError("AdvertisingShop must load before AdCommandControllerPatch")
         self._install_command()
         self._install_helpers()
 
     def _install_command(self):
         command = next((c for c in self.shop.get_commands() if getattr(c, "name", "") == "اعلان"), None)
         if command is None:
-            return
+            raise RuntimeError("AdvertisingShop.$اعلان command was not found")
 
         async def callback(cog, ctx, member: discord.Member | None = None):
-            # $اعلان is Administrator-only. Do not use the configurable role list here.
             if ctx.guild is None or not ctx.author.guild_permissions.administrator:
                 return await ctx.reply(
                     "❌ هذا الأمر مخصص لمن لديهم صلاحية Administrator فقط.",
