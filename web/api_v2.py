@@ -67,12 +67,37 @@ def create_app(bot) -> FastAPI:
 
     async def authorized_guild(request: Request, guild_id: int):
         user = await session_user(request)
-        guild = bot.get_guild(guild_id)
-        if not guild:
-            raise HTTPException(status_code=404, detail="الخادم غير موجود أو البوت غير موجود فيه")
-        guilds = request.session.get("managed_guilds", {})
-        if str(guild_id) not in guilds:
+        guilds = request.session.get("managed_guilds", {}) or {}
+        session_guild = guilds.get(str(guild_id))
+        if not session_guild:
             raise HTTPException(status_code=403, detail="لا تملك صلاحية إدارة هذا الخادم")
+
+        # Do not depend exclusively on the local Discord.py guild cache. After
+        # a restart, or in larger bots, the guild can be reachable but not yet
+        # present in cache. fetch_guild() confirms that the bot is actually in
+        # the server and prevents the dashboard from falsely showing an access
+        # error.
+        guild = bot.get_guild(guild_id)
+        if guild is None:
+            try:
+                guild = await bot.fetch_guild(guild_id)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=404,
+                    detail="الخادم غير موجود أو البوت غير متصل به حالياً",
+                ) from exc
+
+        # The managed_guilds session is built from Discord OAuth2's /users/@me/guilds
+        # endpoint and is already filtered to Administrator/Manage Server. Accept
+        # both permission bits here, including an explicitly stored admin flag.
+        try:
+            permissions = int(session_guild.get("permissions", 0) or 0)
+        except (TypeError, ValueError):
+            permissions = 0
+        is_manager = bool(permissions & 0x8 or permissions & 0x20 or session_guild.get("administrator"))
+        if not is_manager:
+            raise HTTPException(status_code=403, detail="لا تملك صلاحية إدارة هذا الخادم")
+
         return guild, user
 
     @app.get("/", response_class=HTMLResponse)
@@ -135,12 +160,22 @@ def create_app(bot) -> FastAPI:
         managed = {}
         for g in user_guilds:
             permissions = int(g.get("permissions", 0))
-            if permissions & 0x8 or permissions & 0x20:
-                if bot.get_guild(int(g["id"])):
-                    managed[str(g["id"])] = {
-                        "id": int(g["id"]), "name": g.get("name", ""),
-                        "icon": g.get("icon"), "permissions": permissions,
-                    }
+            administrator = bool(permissions & 0x8)
+            manage_guild = bool(permissions & 0x20)
+            if administrator or manage_guild:
+                guild_id = int(g["id"])
+                # Do not make OAuth login fail simply because Discord.py's
+                # local guild cache is cold after a restart. The server can be
+                # resolved later by authorized_guild() with fetch_guild().
+                managed[str(guild_id)] = {
+                    "id": guild_id,
+                    "name": g.get("name", ""),
+                    "icon": g.get("icon"),
+                    "permissions": permissions,
+                    "administrator": administrator,
+                    "manage_guild": manage_guild,
+                }
+
         request.session.clear()
         request.session["discord_user"] = {"id": int(user["id"]), "username": user.get("username", "")}
         request.session["managed_guilds"] = managed
@@ -339,28 +374,17 @@ def _dashboard_html() -> str:
 const S={guild:null,view:'overview',guilds:[],roles:[],channels:[]};
 const rootEl=document.getElementById('root');
 const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
-async function api(url,opt){let r=await fetch(url,opt);if(r.status===401){location.href='/login';throw new Error('تسجيل الدخول مطلوب')}let d;try{d=await r.json()}catch{throw new Error('استجابة غير صالحة من الخادم')}if(!r.ok)throw Error(d.detail||'حدث خطأ');return d}
-async function init(){try{let me=await api('/api/me');if(!me.logged_in){login();return}let g=await api('/api/guilds');S.guilds=g.guilds||[];S.guild=S.guilds[0]?.id;render()}catch(e){rootEl.innerHTML='<div class="login"><div class="card"><div class="logo">NOVA ARO</div><h1>تعذر تحميل لوحة التحكم</h1><p class="muted">'+esc(e.message||'حدث خطأ غير معروف')+'</p><a class="btn primary" href="/">إعادة المحاولة</a></div></div>'}}
-function login(){rootEl.innerHTML='<div class="login"><div class="card"><div class="logo">NOVA ARO</div><h1>لوحة التحكم الاحترافية</h1><p class="muted">إدارة البوت، الأوامر، الاختصارات، التذاكر والأنظمة من مكان واحد.</p><a class="btn primary" href="/login">تسجيل الدخول بواسطة Discord</a></div></div>'}
-function render(){rootEl.innerHTML='<div class="app"><aside class="side"><div class="brand">NOVA ARO</div><div class="sub">لوحة تحكم Ader</div><div class="nav">'+[['overview','نظرة عامة'],['commands','الأوامر'],['shortcuts','الاختصارات'],['tickets','التذاكر'],['teams','الأندية والمنتخبات']].map(x=>`<button class="${S.view==x[0]?'active':''}" onclick="go('${x[0]}')">${x[1]}</button>`).join('')+'</div><div style="margin-top:28px"><a class="muted" href="/logout">تسجيل الخروج</a></div></aside><main class="main"><div class="top"><div><h1 style="margin:0">${labelView()}</h1><div class="muted">كل الإعدادات محفوظة مباشرة في قاعدة بيانات البوت.</div></div><select class="select" onchange="changeGuild(this.value)">${S.guilds.map(g=>`<option value="${g.id}" ${String(g.id)==String(S.guild)?'selected':''}>${esc(g.name)}</option>`).join('')}</select></div><div id="content"></div></main></div>';loadView()}
-function labelView(){return {overview:'نظرة عامة',commands:'إدارة الأوامر',shortcuts:'إدارة الاختصارات',tickets:'نظام التذاكر',teams:'الأندية والمنتخبات'}[S.view]}
-function go(v){S.view=v;render()}function changeGuild(v){S.guild=Number(v);loadView()}
-async function loadView(){try{let content=document.getElementById('content');if(!S.guild)return content.innerHTML='<div class="empty">لا يوجد خادم مُدار وموجود فيه البوت.</div>';if(S.view==='overview')return overview();if(S.view==='commands')return commands();if(S.view==='shortcuts')return shortcuts();if(S.view==='tickets')return tickets();return teams()}catch(e){let content=document.getElementById('content');if(content)content.innerHTML='<div class="card">❌ '+esc(e.message)+'</div>'}}
-async function overview(){let d=await api(`/api/guilds/${S.guild}/overview`);document.getElementById('content').innerHTML='<div class="grid">'+[['👥','الأعضاء',d.members],['📺','القنوات',d.channels],['🎫','التذاكر المفتوحة',d.open_tickets],['🏆','الفرق الموثقة',d.verified_teams]].map(x=>`<div class="card"><div class="muted">${x[0]} ${x[1]}</div><div class="metric">${x[2]}</div></div>`).join('')+'</div><div class="section card"><h2>Nova Aro</h2><p class="muted">عدد أوامر البوت المتاحة حاليًا: ${d.commands}. يمكنك ضبط صلاحيات كل أمر حسب الرتب والقنوات.</p></div>'}
-async function resources(){if(!S.roles.length){let d=await api(`/api/guilds/${S.guild}/resources`);S.roles=d.roles;S.channels=d.channels}return {roles:S.roles,channels:S.channels}}
-function multi(items,selected,name){return '<div class="checks">'+items.map(x=>`<label class="check"><input type="checkbox" name="${name}" value="${x.id}" ${selected.includes(x.id)?'checked':''}> ${esc(x.name)}</label>`).join('')+'</div>'}
-async function commands(){let [d,r]=await Promise.all([api(`/api/guilds/${S.guild}/commands`),resources()]);document.getElementById('content').innerHTML='<div class="toolbar"><input id="filter" class="select" style="min-width:220px" placeholder="بحث عن أمر..." oninput="filterRows()"></div><div class="card"><table class="table"><thead><tr><th>الأمر</th><th>الحالة</th><th>التحكم</th></tr></thead><tbody id="rows">'+d.commands.map(c=>`<tr data-name="${esc(c.name.toLowerCase())}"><td><b>/${esc(c.name)}</b><div class="muted">${esc(c.description)}</div></td><td><span class="pill ${c.enabled?'on':'off'}">${c.enabled?'مفعل':'معطل'}</span></td><td><button class="btn primary" onclick='editCommand(${JSON.stringify(c)})'>تخصيص</button></td></tr>`).join('')+'</tbody></table></div>'}
-function filterRows(){let q=document.getElementById('filter').value.toLowerCase();document.querySelectorAll('#rows tr').forEach(r=>r.style.display=r.dataset.name.includes(q)?'':'none')}
-async function editCommand(c){let r=await resources();showModal(`<h2>تخصيص /${esc(c.name)}</h2><div class="field"><label>الحالة</label><select id="enabled"><option value="1" ${c.enabled?'selected':''}>مفعل</option><option value="0" ${!c.enabled?'selected':''}>معطل</option></select></div><div class="field"><label>الرتب المسموحة (فارغ = الجميع)</label>${multi(r.roles,c.allowed_roles,'ar')}</div><div class="field"><label>الرتب المرفوضة</label>${multi(r.roles,c.denied_roles,'dr')}</div><div class="field"><label>القنوات المسموحة (فارغ = الجميع)</label>${multi(r.channels,c.allowed_channels,'ac')}</div><div class="field"><label>القنوات المرفوضة</label>${multi(r.channels,c.denied_channels,'dc')}</div><div class="toolbar"><button class="btn primary" onclick="saveCommand('${encodeURIComponent(c.name)}')">حفظ</button><button class="btn" onclick="closeModal()">إلغاء</button></div>`)}
-function vals(n){return [...document.querySelectorAll(`input[name="${n}"]:checked`)].map(x=>Number(x.value))}
-async function saveCommand(n){await api(`/api/guilds/${S.guild}/commands/${n}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:document.getElementById('enabled').value==='1',allowed_roles:vals('ar'),denied_roles:vals('dr'),allowed_channels:vals('ac'),denied_channels:vals('dc')})});closeModal();commands()}
-async function shortcuts(){let [d,r]=await Promise.all([api(`/api/guilds/${S.guild}/shortcuts`),resources()]);document.getElementById('content').innerHTML='<div class="card"><table class="table"><thead><tr><th>الاختصار</th><th>Alias</th><th>الحالة</th><th></th></tr></thead><tbody>'+d.shortcuts.map(s=>`<tr><td><b>${esc(s.label)}</b><div class="muted">${esc(s.name)}</div></td><td><code>${esc(s.alias)}</code></td><td><span class="pill ${s.enabled?'on':'off'}">${s.enabled?'مفعل':'معطل'}</span></td><td><button class="btn primary" onclick='editShortcut(${JSON.stringify(s)})'>تخصيص</button></td></tr>`).join('')+'</tbody></table></div>'}
-async function editShortcut(s){let r=await resources();showModal(`<h2>تخصيص ${esc(s.label)}</h2><div class="field"><label>الاختصار</label><input id="alias" value="${esc(s.alias)}"></div><div class="field"><label>الحالة</label><select id="enabled"><option value="1" ${s.enabled?'selected':''}>مفعل</option><option value="0" ${!s.enabled?'selected':''}>معطل</option></select></div><div class="field"><label>الرتب المسموحة</label>${multi(r.roles,s.allowed_roles,'ar')}</div><div class="field"><label>الرتب المرفوضة</label>${multi(r.roles,s.denied_roles,'dr')}</div><div class="field"><label>القنوات المسموحة</label>${multi(r.channels,s.allowed_channels,'ac')}</div><div class="field"><label>القنوات المرفوضة</label>${multi(r.channels,s.denied_channels,'dc')}</div><div class="toolbar"><button class="btn primary" onclick="saveShortcut('${encodeURIComponent(s.name)}')">حفظ</button><button class="btn" onclick="closeModal()">إلغاء</button></div>`)}
-async function saveShortcut(n){await api(`/api/guilds/${S.guild}/shortcuts/${n}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({alias:document.getElementById('alias').value,enabled:document.getElementById('enabled').value==='1',allowed_roles:vals('ar'),denied_roles:vals('dr'),allowed_channels:vals('ac'),denied_channels:vals('dc')})});closeModal();shortcuts()}
-async function tickets(){let [d,r]=await Promise.all([api(`/api/guilds/${S.guild}/tickets`),resources()]);document.getElementById('content').innerHTML='<div class="toolbar"><button class="btn primary" onclick="newPanel()">+ إنشاء لوحة تذاكر</button></div><div class="grid"><div class="card"><div class="muted">لوحات التذاكر</div><div class="metric">'+d.panels.length+'</div></div><div class="card"><div class="muted">آخر التذاكر</div><div class="metric">'+d.tickets.length+'</div></div></div><div class="section card"><h2>لوحات التذاكر</h2><table class="table"><thead><tr><th>#</th><th>العنوان</th><th>الوضع</th><th>القناة</th></tr></thead><tbody>'+d.panels.map(p=>`<tr><td>#${p.id}</td><td>${esc(p.title)}</td><td>${esc(p.mode)}</td><td>${p.channel_id?'<#'+p.channel_id+'>':'—'}</td></tr>`).join('')+'</tbody></table></div>'}
-async function newPanel(){let r=await resources();showModal(`<h2>إنشاء لوحة تذاكر</h2><div class="field"><label>العنوان</label><input id="ptitle" value="🎫 الدعم الفني"></div><div class="field"><label>الوصف</label><textarea id="pdesc">اختار القسم المناسب لفتح تذكرة.</textarea></div><div class="field"><label>قناة النشر</label><select id="pchannel">${r.channels.filter(c=>c.type.includes('text')).map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div><div class="field"><label>الفئة</label><select id="pcategory">${r.channels.filter(c=>c.type.includes('category')).map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div><div class="field"><label>دور الدعم</label><select id="prole"><option value="">بدون</option>${r.roles.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select></div><div class="field"><label>الوضع</label><select id="pmode"><option value="buttons">أزرار</option><option value="select">قائمة اختيار</option></select></div><div class="toolbar"><button class="btn primary" onclick="savePanel()">نشر اللوحة</button><button class="btn" onclick="closeModal()">إلغاء</button></div>`)}
-async function savePanel(){await api(`/api/guilds/${S.guild}/tickets/panels`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:document.getElementById('ptitle').value,description:document.getElementById('pdesc').value,channel_id:Number(document.getElementById('pchannel').value),category_id:Number(document.getElementById('pcategory').value),support_role_id:Number(document.getElementById('prole').value)||null,mode:document.getElementById('pmode').value,options:[{name:'فتح تذكرة',emoji:'🎫',ticket_name:'ticket-{user}',description:'فتح تذكرة'}]})});closeModal();tickets()}
-async function teams(){let d=await api(`/api/guilds/${S.guild}/teams`);document.getElementById('content').innerHTML='<div class="card"><h2>الفرق الموثقة</h2><table class="table"><thead><tr><th>الفريق</th><th>النوع</th><th>اللاعبون</th><th>الرتبة</th></tr></thead><tbody>'+d.teams.map(t=>`<tr><td>${esc(t.emoji)} <b>${esc(t.name)}</b></td><td>${t.team_type==='national'?'منتخب وطني':'نادي'}</td><td>${t.players}</td><td><@&${t.role_id}></td></tr>`).join('')+'</tbody></table></div>'}
-function showModal(html){let m=document.createElement('div');m.id='modal';m.className='modal show';m.innerHTML='<div class="dialog">'+html+'</div>';document.body.appendChild(m)}function closeModal(){document.getElementById('modal')?.remove()}
-init();
+async function api(url,opt){let r=await fetch(url,opt);if(r.status===401){location.href='/login';throw new Error('تسجيل الدخول مطلوب')}let d;try{d=await r.json()}catch{throw new Error('استجابة غير صالحة من الخادم')}if(!r.ok)throw new Error(d.detail||'فشل الطلب');return d}
+function shell(){rootEl.innerHTML=`<div class="app"><aside class="side"><div class="brand">NOVA ARO</div><div class="sub">Ader Dashboard</div><div class="nav"><button data-v="overview">نظرة عامة</button><button data-v="commands">الأوامر</button><button data-v="shortcuts">الاختصارات</button><button data-v="tickets">التذاكر</button><button data-v="teams">الفرق</button><button onclick="location.href='/logout'">تسجيل الخروج</button></div></aside><main class="main"><div id="main"></div></main></div>`;document.querySelectorAll('.nav button[data-v]').forEach(b=>b.onclick=()=>{S.view=b.dataset.v;loadView()})}
+async function loadGuilds(){const d=await api('/api/guilds');S.guilds=d.guilds||[];if(!S.guild){S.guild=S.guilds[0]?.id}if(!S.guild){rootEl.innerHTML='<div class="login"><div class="card"><div class="logo">NOVA ARO</div><h2>لا توجد سيرفرات قابلة للإدارة</h2><p class="muted">تأكد من صلاحياتك في Discord وأن البوت موجود في السيرفر.</p></div></div>';return}shell();loadView()}
+async function loadView(){document.querySelectorAll('.nav button[data-v]').forEach(b=>b.classList.toggle('active',b.dataset.v===S.view));const main=document.getElementById('main');main.innerHTML='<div class="empty">جار تحميل البيانات...</div>';try{if(S.view==='overview')return overview();if(S.view==='commands')return commands();if(S.view==='shortcuts')return shortcuts();if(S.view==='tickets')return tickets();if(S.view==='teams')return teams()}catch(e){main.innerHTML=`<div class="card"><h2>تعذر جلب بيانات السيرفر.</h2><p class="muted">${esc(e.message)}</p></div>`}}
+async function overview(){const d=await api(`/api/guilds/${S.guild}/overview`);document.getElementById('main').innerHTML=`<div class="top"><div><h1>السيرفر</h1><p class="muted">اختار السيرفر لإظهار الإحصائيات.</p></div><select class="select" onchange="S.guild=Number(this.value);loadView()">${S.guilds.map(g=>`<option value="${g.id}" ${g.id===S.guild?'selected':''}>${esc(g.name)}</option>`).join('')}</select></div><div class="grid">${[['الأعضاء',d.members],['القنوات',d.channels],['التذاكر المفتوحة',d.open_tickets],['الفرق الموثقة',d.verified_teams]].map(x=>`<div class="card"><div class="muted">${x[0]}</div><div class="metric">${x[1]}</div></div>`).join('')}</div><div class="section card"><h2>أدوات الإدارة</h2><p class="muted">عدد الأوامر المتاحة: ${d.commands}</p><div class="toolbar"><button class="btn primary" onclick="S.view='commands';loadView()">إعداد الأوامر</button><button class="btn" onclick="S.view='shortcuts';loadView()">إعداد الاختصارات</button><button class="btn" onclick="S.view='tickets';loadView()">إدارة التذاكر</button></div></div>`}
+async function commands(){const d=await api(`/api/guilds/${S.guild}/commands`);renderSettings('الأوامر',d.commands||[],'command')}
+async function shortcuts(){const d=await api(`/api/guilds/${S.guild}/shortcuts`);renderSettings('الاختصارات',d.shortcuts||[],'shortcut')}
+function renderSettings(title,items,type){document.getElementById('main').innerHTML=`<div class="top"><div><h1>${title}</h1><p class="muted">تقدر تفعل/تعطل وتخصص الصلاحيات.</p></div><button class="btn" onclick="S.view='overview';loadView()">رجوع</button></div><div class="card"><table class="table"><thead><tr><th>الاسم</th><th>الاختصار/الوصف</th><th>الحالة</th><th></th></tr></thead><tbody>${items.map(x=>`<tr><td><b>${esc(x.label||x.name)}</b></td><td class="muted">${esc(x.alias||x.description||'')}</td><td><span class="pill ${x.enabled?'on':'off'}">${x.enabled?'مفعل':'معطل'}</span></td><td><button class="btn primary" onclick='editItem(${JSON.stringify(x)},${JSON.stringify(type)})'>تعديل</button></td></tr>`).join('')}</tbody></table></div>`}
+async function tickets(){const d=await api(`/api/guilds/${S.guild}/tickets`);document.getElementById('main').innerHTML=`<div class="top"><div><h1>التذاكر</h1><p class="muted">لوحات التذاكر والتذاكر المسجلة.</p></div></div><div class="grid"><div class="card"><div class="muted">لوحات</div><div class="metric">${(d.panels||[]).length}</div></div><div class="card"><div class="muted">التذاكر</div><div class="metric">${(d.tickets||[]).length}</div></div></div><div class="section card"><h2>آخر التذاكر</h2><table class="table"><thead><tr><th>ID</th><th>القناة</th><th>العضو</th><th>الحالة</th></tr></thead><tbody>${(d.tickets||[]).map(t=>`<tr><td>${t.id}</td><td>${t.channel_id}</td><td>${t.user_id}</td><td>${esc(t.status)}</td></tr>`).join('')}</tbody></table></div>`}
+async function teams(){const d=await api(`/api/guilds/${S.guild}/teams`);document.getElementById('main').innerHTML=`<div class="top"><div><h1>الفرق</h1><p class="muted">الفرق الموثقة وأعداد الأعضاء.</p></div></div><div class="card"><table class="table"><thead><tr><th>الفريق</th><th>النوع</th><th>الأعضاء</th></tr></thead><tbody>${(d.teams||[]).map(t=>`<tr><td>${esc(t.name||t.team_name||t.id)}</td><td>${esc(t.team_type||'')}</td><td>${t.players||0}</td></tr>`).join('')}</tbody></table></div>`}
+async function editItem(item,type){const channelOptions=S.channels.map(c=>`<label class="check"><input type="checkbox" name="channels" value="${c.id}" ${(item.allowed_channels||[]).includes(c.id)?'checked':''}> ${esc(c.name)}</label>`).join('');const roleOptions=S.roles.map(r=>`<label class="check"><input type="checkbox" name="roles" value="${r.id}" ${(item.allowed_roles||[]).includes(r.id)?'checked':''}> ${esc(r.name)}</label>`).join('');if(!S.roles.length||!S.channels.length){try{const d=await api(`/api/guilds/${S.guild}/resources`);S.roles=d.roles||[];S.channels=d.channels||[]}catch(e){}}document.body.insertAdjacentHTML('beforeend',`<div class="modal show" id="m"><div class="dialog"><h2>تعديل ${esc(item.label||item.name)}</h2><div class="field"><label>مفعل</label><input id="enabled" type="checkbox" ${item.enabled?'checked':''}></div>${type==='shortcut'?'<div class="field"><label>الاختصار</label><input id="alias" value="'+esc(item.alias||'')+'"></div>':''}<div class="field"><label>الرتب المسموحة</label><div class="checks">${roleOptions}</div></div><div class="field"><label>القنوات المسموحة</label><div class="checks">${channelOptions}</div></div><div class="toolbar"><button class="btn primary" onclick="saveItem(${JSON.stringify(item)},${JSON.stringify(type)})">حفظ</button><button class="btn" onclick="document.getElementById('m').remove()">إلغاء</button></div></div></div>`)}
+async function saveItem(item,type){const enabled=document.getElementById('enabled').checked;const roles=[...document.querySelectorAll('input[name=roles]:checked')].map(x=>Number(x.value));const channels=[...document.querySelectorAll('input[name=channels]:checked')].map(x=>Number(x.value));const data={enabled,allowed_roles:roles,denied_roles:[],allowed_channels:channels,denied_channels:[]};if(type==='shortcut')data.alias=document.getElementById('alias').value;try{const path=type==='shortcut'?`/api/guilds/${S.guild}/shortcuts/${encodeURIComponent(item.name)}`:`/api/guilds/${S.guild}/commands/${encodeURIComponent(item.name)}`;await api(path,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});document.getElementById('m').remove();loadView()}catch(e){alert(e.message)}}
+loadGuilds();
 </script></body></html>'''
