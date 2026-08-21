@@ -1,8 +1,8 @@
 """Ader's canonical FastAPI dashboard server.
 
 The dashboard shares the running Discord bot instance and the same SQLite
-DatabaseManager, so dashboard changes apply immediately without a second bot
-or a separate MongoDB service.
+DatabaseManager. The frontend is served from a self-contained FastAPI app,
+so no separate Node/Vite process or static build is required.
 """
 from __future__ import annotations
 
@@ -77,11 +77,7 @@ class DashboardServer(commands.Cog):
         await self._migrate_dashboard()
         try:
             import uvicorn
-            # Use the canonical dashboard application directly. The previous
-            # dashboard_runtime wrapper re-filtered OAuth guilds against the
-            # transient Discord.py cache and could falsely report that a bot
-            # was not connected to a server immediately after login/restart.
-            from web.api_v2 import create_app
+            from web.dashboard_app import create_app
         except Exception as exc:
             self.log.error("Dashboard dependencies are unavailable: %s", exc, exc_info=True)
             return
@@ -89,10 +85,13 @@ class DashboardServer(commands.Cog):
         host, port = self._resolve_host(cfg), self._resolve_port(cfg)
         app = create_app(self.bot)
         config = uvicorn.Config(
-            app, host=host, port=port,
+            app,
+            host=host,
+            port=port,
             log_level=str(cfg.get("log_level", "info")).lower(),
             access_log=bool(cfg.get("access_log", False)),
-            proxy_headers=True, forwarded_allow_ips="*",
+            proxy_headers=True,
+            forwarded_allow_ips="*",
         )
         self.server = uvicorn.Server(config)
         self.task = asyncio.create_task(self.server.serve(), name="ader-dashboard")
