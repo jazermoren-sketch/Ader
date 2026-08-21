@@ -21,15 +21,14 @@ class ReplyTargetModal(discord.ui.Modal, title="تحديد رسالة الـRepl
             target_id = int(str(self.message_id.value).strip())
         except ValueError:
             return await interaction.response.send_message("❌ ID غير صالح.", ephemeral=True)
-        try:
-            target = await interaction.channel.fetch_message(target_id)
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            return await interaction.response.send_message("❌ ما قدرتش نلقى هاد الرسالة فالروم الحالي.", ephemeral=True)
         await self.cog.db.execute(
             "UPDATE ad_custom_messages SET reply_to=? WHERE id=? AND guild_id=?",
-            (str(target.id), self.custom_message_id, interaction.guild.id),
+            (str(target_id), self.custom_message_id, interaction.guild.id),
         )
-        await interaction.response.send_message(f"✅ تم تعيين Reply للرسالة `{target.id}`.", ephemeral=True)
+        await interaction.response.send_message(
+            f"✅ تم تعيين Reply للرسالة `{target_id}`. تقدر تكون رسالة عادية، Giveaway أو رسالة فيها Attachment.",
+            ephemeral=True,
+        )
 
 
 class ReplyTargetButton(discord.ui.Button):
@@ -116,10 +115,8 @@ class RuntimeRepairs(commands.Cog):
         )
         shortcuts_module.has_server_manage_permission = permission
         command = next((c for c in self.bot.tree.get_commands() if getattr(c, "name", "") == "اختصارات"), None)
-        if command is None:
-            return
         cog = self.bot.get_cog("Shortcuts")
-        if cog is None:
+        if command is None or cog is None:
             return
         async def shortcuts_callback(cog_obj, interaction: discord.Interaction, اخفاء: bool = False):
             if not permission(interaction):
@@ -136,7 +133,8 @@ class RuntimeRepairs(commands.Cog):
         if ad_shop is None:
             return
 
-        await self.db.execute("ALTER TABLE ad_giveaways ADD COLUMN message_id INTEGER") if not await self._has_column("ad_giveaways", "message_id") else None
+        if not await self._has_column("ad_giveaways", "message_id"):
+            await self.db.execute("ALTER TABLE ad_giveaways ADD COLUMN message_id INTEGER")
 
         view_cls = advertising_shop.GiveawayView
         if not getattr(view_cls, "_ader_emoji_only", False):
@@ -209,7 +207,8 @@ class RuntimeRepairs(commands.Cog):
         if cog is None:
             return
 
-        await self.db.execute("ALTER TABLE ad_custom_messages ADD COLUMN reply_to TEXT") if not await self._has_column("ad_custom_messages", "reply_to") else None
+        if not await self._has_column("ad_custom_messages", "reply_to"):
+            await self.db.execute("ALTER TABLE ad_custom_messages ADD COLUMN reply_to TEXT")
 
         cog.is_admin = lambda interaction: bool(
             interaction.guild and (interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild)
@@ -238,10 +237,7 @@ class RuntimeRepairs(commands.Cog):
                 channel = interaction.guild.get_channel(int(room["channel_id"]))
                 if channel is None:
                     return
-                rows = await self.db.fetchall(
-                    "SELECT * FROM ad_custom_messages WHERE guild_id=? AND enabled=1 ORDER BY position,id",
-                    (interaction.guild.id,),
-                )
+                rows = await self.db.fetchall("SELECT * FROM ad_custom_messages WHERE guild_id=? AND enabled=1 ORDER BY position,id", (interaction.guild.id,))
                 for row in rows:
                     if str(row["event"] or "after_ad") != "after_ad":
                         continue
