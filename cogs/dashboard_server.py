@@ -77,7 +77,11 @@ class DashboardServer(commands.Cog):
         await self._migrate_dashboard()
         try:
             import uvicorn
-            from web.dashboard_runtime import create_app
+            # Use the canonical dashboard application directly. The previous
+            # dashboard_runtime wrapper re-filtered OAuth guilds against the
+            # transient Discord.py cache and could falsely report that a bot
+            # was not connected to a server immediately after login/restart.
+            from web.api_v2 import create_app
         except Exception as exc:
             self.log.error("Dashboard dependencies are unavailable: %s", exc, exc_info=True)
             return
