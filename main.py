@@ -89,9 +89,15 @@ class Ader(commands.Bot):
             # dashboard unavailable/blank after a restart.
             "web_dashboard.py",
         }
-        for path in sorted(directory.glob("*.py")):
-            if path.stem.startswith("_") or path.stem == "__init__" or path.name in disabled:
-                continue
+        paths = [
+            p for p in directory.glob("*.py")
+            if not (p.stem.startswith("_") or p.stem == "__init__" or p.name in disabled)
+        ]
+        # AdvertisingShop owns the $اعلان command. The controller patch depends
+        # on that cog already existing, so force this dependency order instead of
+        # relying on filesystem/alphabetical ordering.
+        paths.sort(key=lambda p: (0 if p.stem == "advertising_shop" else 1 if p.stem == "ad_command_controller_patch" else 2, p.stem))
+        for path in paths:
             try:
                 if path.stem == "official_shortcuts":
                     legacy = self.get_command("اعطي")
