@@ -9,7 +9,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-
 EVENTS = {
     "after_ad": "بعد الإعلان",
     "after_giveaway": "بعد القيف أواي",
@@ -104,10 +103,11 @@ class MessageModal(discord.ui.Modal):
             return await interaction.response.send_message("❌ الرسالة غير صالحة.", ephemeral=True)
         key = (interaction.guild_id or 0, interaction.user.id)
         event = self.cog.selected_event.get(key, "after_ad")
+        default_target = {"after_ad": "ad", "after_giveaway": "giveaway", "after_image": "image", "after_all": "none"}.get(event, "none")
         if self.message_id is None:
             await self.cog.db.execute(
                 "INSERT INTO ad_custom_messages(guild_id,name,content,event,reply_to,reply_target,enabled,position,created_at,last_message_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (interaction.guild.id, name, content, event, None, "ad", 1, await self.cog.next_position(interaction.guild.id), time.time(), None),
+                (interaction.guild.id, name, content, event, None, default_target, 1, await self.cog.next_position(interaction.guild.id), time.time(), None),
             )
         else:
             await self.cog.db.execute("UPDATE ad_custom_messages SET name=?,content=?,event=? WHERE id=? AND guild_id=?", (name, content, event, self.message_id, interaction.guild.id))
