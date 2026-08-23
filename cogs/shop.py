@@ -232,9 +232,19 @@ class Shop(commands.Cog):
             inventory.append({"shop_item_id": item_id, "name": item["name"], "price": price, "purchased_at": int(time.time())})
             await conn.execute("UPDATE users SET inventory=? WHERE user_id=? AND guild_id=?", (json.dumps(inventory, ensure_ascii=False), user_id, guild_id))
             await conn.commit()
+            # Product delivery is deliberately a supported extension point, not a
+            # replacement of this method by an advertising hotfix.
+            delivery = getattr(self.bot, "ad_delivery_handler", None)
+            if delivery is not None:
+                delivered, delivery_text = await delivery(guild_id, user_id, item)
+                if not delivered:
+                    # The delivery handler refunds its own failed delivery.  The
+                    # purchase remains recorded for auditability.
+                    return False, delivery_text
             new_balance = balance - price
             stock_text = "غير محدود" if stock < 0 else str(stock - 1)
-            return True, f"اشتريت **{item['name']}** مقابل **{price:,} {self.currency_name}**.\nرصيدك الجديد: **{new_balance:,} {self.currency_name}**.\nالمخزون المتبقي: **{stock_text}**."
+            text = f"اشتريت **{item['name']}** مقابل **{price:,} {self.currency_name}**.\nرصيدك الجديد: **{new_balance:,} {self.currency_name}**.\nالمخزون المتبقي: **{stock_text}**."
+            return True, text + (f"\n{delivery_text}" if delivery is not None and delivery_text else "")
         except Exception:
             try:
                 await conn.rollback()

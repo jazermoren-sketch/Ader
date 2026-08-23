@@ -10,6 +10,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import secrets
 import time
 from typing import Any
 from urllib.parse import quote
@@ -105,16 +106,16 @@ def create_app(bot) -> FastAPI:
 
     secret = os.getenv("DASHBOARD_SESSION_SECRET", "").strip() or str(cfg.get("session_secret", "")).strip()
     if len(secret) < 32:
-        # Never use the bot token as the session key. A deterministic local fallback
-        # keeps development usable while production is explicitly encouraged to set
-        # DASHBOARD_SESSION_SECRET.
-        secret = f"ader-dashboard:{os.getenv('DISCORD_CLIENT_ID', 'local')}:{str(cfg.get('public_url', 'local'))}"
+        # Never derive a session key from public configuration or the bot token.
+        # A process-local random key is safe, with the explicit trade-off that all
+        # dashboard sessions expire on restart until the host sets a persistent key.
+        secret = secrets.token_urlsafe(48)
 
     app.add_middleware(
         SessionMiddleware,
         secret_key=secret,
         same_site="lax",
-        https_only=False,
+        https_only=str(cfg.get("public_url", "")).startswith("https://"),
         max_age=86400,
     )
     app.add_middleware(

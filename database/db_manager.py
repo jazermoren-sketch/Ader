@@ -112,6 +112,41 @@ class DatabaseManager:
             count INTEGER NOT NULL DEFAULT 0, window_start REAL NOT NULL,
             PRIMARY KEY(guild_id, user_id, action)
         );
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            name TEXT PRIMARY KEY, applied_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS ad_rooms (
+            guild_id INTEGER NOT NULL, channel_id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL,
+            mention_type TEXT NOT NULL DEFAULT 'everyone', template TEXT NOT NULL DEFAULT '',
+            image_path TEXT, panel_message_id INTEGER, active INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS ad_settings (
+            guild_id INTEGER PRIMARY KEY, allowed_roles TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE TABLE IF NOT EXISTS ad_settings_v2 (
+            guild_id INTEGER PRIMARY KEY, post_message TEXT NOT NULL DEFAULT '',
+            giveaway_enabled INTEGER NOT NULL DEFAULT 0, giveaway_amount INTEGER NOT NULL DEFAULT 3000000,
+            giveaway_duration INTEGER NOT NULL DEFAULT 3600, giveaway_sponsor_id INTEGER,
+            image_path TEXT, updated_at REAL NOT NULL DEFAULT 0, required_guild_id INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS ad_custom_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, name TEXT NOT NULL,
+            content TEXT NOT NULL, event TEXT NOT NULL DEFAULT 'after_ad', reply_to INTEGER,
+            reply_target TEXT NOT NULL DEFAULT 'none', enabled INTEGER NOT NULL DEFAULT 1,
+            position INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL DEFAULT 0,
+            last_message_id INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS ad_giveaways (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,
+            owner_id INTEGER NOT NULL, amount INTEGER NOT NULL, ends_at REAL NOT NULL,
+            ended INTEGER NOT NULL DEFAULT 0, winner_id INTEGER, required_guild_id INTEGER,
+            message_id INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS ad_giveaway_entries (
+            giveaway_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+            PRIMARY KEY(giveaway_id, user_id),
+            FOREIGN KEY(giveaway_id) REFERENCES ad_giveaways(id) ON DELETE CASCADE
+        );
         """)
 
         columns = await self.fetchall("PRAGMA table_info(users)")
@@ -119,11 +154,57 @@ class DatabaseManager:
         if "last_daily" not in names:
             await self.connection.execute("ALTER TABLE users ADD COLUMN last_daily REAL NOT NULL DEFAULT 0")
 
+        # SQLite's CREATE TABLE IF NOT EXISTS never upgrades existing tables.
+        # Keep all compatibility upgrades in this one migration boundary.
+        for table, column, definition in (
+            ("ad_settings_v2", "required_guild_id", "INTEGER"),
+            ("ad_custom_messages", "reply_target", "TEXT NOT NULL DEFAULT 'none'"),
+            ("ad_custom_messages", "last_message_id", "INTEGER"),
+            ("ad_giveaways", "required_guild_id", "INTEGER"),
+            ("ad_giveaways", "message_id", "INTEGER"),
+        ):
+            existing = {str(row[1]) for row in await self.fetchall(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                await self.connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+        await self.connection.executescript("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_guild_user ON users(guild_id, user_id);
+        CREATE INDEX IF NOT EXISTS idx_analytics_guild_time ON analytics(guild_id, timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_ad_rooms_guild_owner ON ad_rooms(guild_id, owner_id, active);
+        CREATE INDEX IF NOT EXISTS idx_ad_giveaways_due ON ad_giveaways(ended, ends_at);
+        CREATE INDEX IF NOT EXISTS idx_ad_custom_event ON ad_custom_messages(guild_id, event, position);
+        """)
+
         await self.connection.execute(
             """INSERT OR IGNORE INTO global_balances(user_id, balance, created_at)
                SELECT user_id, 0, MIN(created_at) FROM users GROUP BY user_id"""
         )
         await self.connection.commit()
+
+    async def get_analytics(self, guild_id: int | None = None, limit: int = 100, event_type: str | None = None) -> List[Dict[str, Any]]:
+        """Return analytics without relying on legacy runtime monkey patches."""
+        clauses, params = [], []
+        if guild_id is not None:
+            clauses.append("guild_id=?")
+            params.append(int(guild_id))
+        if event_type:
+            clauses.append("type=?")
+            params.append(str(event_type))
+        limit = max(1, min(int(limit), 1000))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = await self.fetchall(f"SELECT id,guild_id,type,timestamp,data FROM analytics{where} ORDER BY timestamp DESC LIMIT ?", tuple(params + [limit]))
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["data"] = json.loads(item["data"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                item["data"] = {}
+            result.append(item)
+        return result
+
+    async def record_analytics(self, guild_id: int | None, event_type: str, data: Dict[str, Any] | None = None) -> None:
+        await self.execute("INSERT INTO analytics(guild_id,type,timestamp,data) VALUES(?,?,?,?)", (guild_id, event_type, time.time(), json.dumps(data or {}, ensure_ascii=False)))
 
     async def execute(self, sql: str, params: tuple = ()):
         cur = await self.connection.execute(sql, params)
