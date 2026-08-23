@@ -2,9 +2,9 @@
 Permission checks and utilities for Logiq.
 
 Permission checks must tolerate Discord interactions where the Member object is
-partially resolved. In that case ``Member.guild_permissions`` can raise while
-trying to resolve an uncached role, so interaction-level permissions are used
-first and the guild cache/API are used as safe fallbacks.
+partially resolved. In that case ``Member.guild_permissions`` and ``top_role``
+can raise while trying to resolve uncached/deleted roles, so interaction-level
+permissions and explicit role-position fallbacks are used.
 """
 
 from __future__ import annotations
@@ -18,11 +18,7 @@ from discord import app_commands
 async def _get_interaction_permissions(
     interaction: discord.Interaction,
 ) -> Optional[discord.Permissions]:
-    """Return reliable permissions for a guild interaction without crashing.
-
-    Discord includes resolved permissions on application-command interactions.
-    Prefer those because they do not depend on the local Member role cache.
-    """
+    """Return reliable permissions for a guild interaction without crashing."""
     if interaction.guild is None:
         return None
 
@@ -135,21 +131,40 @@ class PermissionChecker:
     """Utility class for permission checking."""
 
     @staticmethod
+    def _highest_role_position(member: discord.Member) -> int:
+        """Return a safe highest role position even with stale role IDs."""
+        guild = getattr(member, "guild", None)
+        if guild is None:
+            return 0
+        highest = int(getattr(guild.default_role, "position", 0) or 0)
+        for role_id in getattr(member, "_roles", ()):
+            role = guild.get_role(role_id)
+            if role is not None:
+                highest = max(highest, int(getattr(role, "position", 0) or 0))
+        return highest
+
+    @staticmethod
     def check_hierarchy(
         executor: discord.Member,
-        target: discord.Member
+        target: discord.Member,
     ) -> bool:
-        """Check if executor is higher in role hierarchy than target."""
+        """Check if executor is higher in role hierarchy than target safely."""
+        if executor.guild.id != target.guild.id:
+            return False
         if executor.guild.owner_id == executor.id:
             return True
         if target.guild.owner_id == target.id:
             return False
-        return executor.top_role > target.top_role
+
+        try:
+            return executor.top_role > target.top_role
+        except (AttributeError, TypeError):
+            return PermissionChecker._highest_role_position(executor) > PermissionChecker._highest_role_position(target)
 
     @staticmethod
     def can_moderate(
         moderator: discord.Member,
-        target: discord.Member
+        target: discord.Member,
     ) -> tuple[bool, Optional[str]]:
         """Check whether a moderator can act on a target."""
         if moderator.id == target.id:
@@ -163,7 +178,7 @@ class PermissionChecker:
     @staticmethod
     def has_permission(
         member: discord.Member,
-        permission: str
+        permission: str,
     ) -> bool:
         """Check if member has a specific Discord permission."""
         try:
@@ -174,7 +189,7 @@ class PermissionChecker:
     @staticmethod
     def get_missing_permissions(
         member: discord.Member,
-        required_permissions: list[str]
+        required_permissions: list[str],
     ) -> list[str]:
         """Return required Discord permissions missing from a member."""
         return [
