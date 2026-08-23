@@ -323,9 +323,6 @@ class Roles(commands.Cog):
         self.db = db
         self.config = config
         self.module_config = config.get('modules', {}).get('roles', {})
-        # Register persistent views on startup
-        self.bot.loop.create_task(self._register_persistent_views())
-    
     async def _register_persistent_views(self):
         """Register persistent views for role menus"""
         await self.bot.wait_until_ready()

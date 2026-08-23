@@ -20,20 +20,6 @@ try:
 except ImportError:
     fcntl = None
 
-_original_context_send = commands.Context.send
-
-
-async def _context_send(self, *args, **kwargs):
-    content = getattr(getattr(self, "message", None), "content", "") or ""
-    if content.strip().startswith("!") and getattr(self, "message", None) is not None:
-        kwargs.setdefault("mention_author", False)
-        kwargs.setdefault("reference", self.message)
-    return await _original_context_send(self, *args, **kwargs)
-
-
-commands.Context.send = _context_send
-
-
 class Ader(commands.Bot):
     TARGET_GUILD_ID = 1490355290116194388
 
@@ -53,9 +39,15 @@ class Ader(commands.Bot):
         self.config = config
         self.start_time = discord.utils.utcnow()
         self.logger = BotLogger(config.get("logging", {}))
-        self.db = DatabaseManager(config.get("database", {}).get("sqlite_path", "data/ader.sqlite3"))
+        # Hosting providers commonly replace the checkout on deploy.  Keep the
+        # database outside it whenever ADER_DATA_DIR is supplied.
+        configured_db = Path(config.get("database", {}).get("sqlite_path", "data/ader.sqlite3"))
+        data_dir = os.getenv("ADER_DATA_DIR", "").strip()
+        db_path = Path(data_dir) / configured_db.name if data_dir else configured_db
+        self.db = DatabaseManager(str(db_path))
         self._instance_lock_handle = None
         self._ready_sync_done = False
+        self.tree.on_error = self._tree_error
 
     def _acquire_instance_lock(self):
         if fcntl is None:
@@ -90,50 +82,27 @@ class Ader(commands.Bot):
         await self.load_cogs()
 
     async def load_cogs(self):
-        directory = Path(__file__).parent / "cogs"
-        loaded = 0
-        disabled = {
-            "application_system.py",
-            "application_system_v2.py",
-            "application_system_v3.py",
-            "leveling.py",
-            "tickets.py",
-            "teams.py",
-            "tournaments.py",
-            "tournament_delete.py",
-            "ultimate_system.py",
-            "command_sync_fix.py",
-            "official_shortcuts.py",
-            "ad_command_controller_patch.py",
-            "ad_settings_hotfix.py",
-            "ad_settings_v2.py",
-            "zzzz_runtime_repairs.py",
-            "music.py",
-            "web_dashboard.py",
-        }
-        paths = [
-            p for p in directory.glob("*.py")
-            if not (p.stem.startswith("_") or p.stem == "__init__" or p.name in disabled)
-        ]
-        # Shop must be loaded before AdvertisingShop because the latter wraps
-        # Shop._purchase to deliver advertising-room products.
-        paths.sort(key=lambda p: (0 if p.stem == "shop" else 1 if p.stem == "advertising_shop" else 2, p.stem))
-        for path in paths:
+        # This explicit release manifest is the single source of truth.  Do not
+        # discover files alphabetically: that used to load hotfixes and duplicate
+        # implementations beside their canonical cogs.
+        extensions = (
+            "cogs.admin", "cogs.analytics", "cogs.economy", "cogs.shop",
+            "cogs.advertising_shop", "cogs.ad_customization", "cogs.shortcuts",
+            "cogs.moderation", "cogs.roles", "cogs.ticket_manager", "cogs.utility",
+            "cogs.verification", "cogs.games", "cogs.teams_v2",
+            "cogs.temp_voice", "cogs.dashboard_config", "cogs.dashboard_server",
+        )
+        loaded, failed = [], []
+        for extension in extensions:
             try:
-                if path.stem == "application_system_v4":
-                    self.tree.remove_command("تقديم")
-                await self.load_extension(f"cogs.{path.stem}")
-                loaded += 1
-            except Exception as exc:
-                self.logger.error(f"Failed to load cog {path.stem}: {exc}", exc_info=True)
-        self._remove_legacy_ticket_commands()
-        self.logger.info(f"Loaded {loaded} cogs")
-
-    def _remove_legacy_ticket_commands(self):
-        for command in list(self.tree.get_commands()):
-            name = str(command.name).lower()
-            if name != "ticket" and "ticket" in name:
-                self.tree.remove_command(command.name)
+                await self.load_extension(extension)
+                loaded.append(extension)
+            except Exception:
+                failed.append(extension)
+                self.logger.error(f"Failed to load cog {extension}", exc_info=True)
+        self.logger.info("Loaded cogs (%d): %s", len(loaded), ", ".join(loaded))
+        if failed:
+            self.logger.error("Disabled after load failures (%d): %s", len(failed), ", ".join(failed))
 
     async def _dashboard_allowed(self, guild_id, command_name, user, channel_id=None):
         try:
@@ -168,55 +137,21 @@ class Ader(commands.Bot):
     async def on_message(self, message: discord.Message):
         if message.author.bot:
             return
-        if message.guild is not None:
-            raw = message.content.strip()
-            parts = raw.split()
-            if parts and parts[0].lower() == "a":
-                economy = self.get_cog("Economy")
-                if economy is not None:
-                    mentions = list(message.mentions)
-                    if len(mentions) > 1:
-                        await message.channel.send("❌ يرجى تحديد عضو واحد فقط.", delete_after=8)
-                        return
-                    if len(parts) == 1 and not mentions:
-                        balance = await self.db.get_balance(message.author.id)
-                        await message.channel.send(f"🪙 رصيدك الحالي هو **{balance:,} ANOCoin**.")
-                        return
-                    if not mentions:
-                        await message.channel.send("❌ الاستعمال: `A @العضو` أو `A @العضو المبلغ`.", delete_after=8)
-                        return
-                    member = mentions[0]
-                    amount = None
-                    if len(parts) >= 3:
-                        try:
-                            amount = int(parts[-1].replace(",", ""))
-                        except ValueError:
-                            await message.channel.send("❌ المبلغ يجب أن يكون رقماً صحيحاً.", delete_after=8)
-                            return
-                    if amount is None:
-                        balance = await self.db.get_balance(member.id)
-                        await message.channel.send(f"🪙 رصيد {member.mention} الحالي هو **{balance:,} ANOCoin**.")
-                        return
-                    if amount <= 0:
-                        await message.channel.send("❌ يجب أن يكون المبلغ أكبر من صفر.", delete_after=8)
-                        return
-                    if member.bot or member.id == message.author.id:
-                        await message.channel.send("❌ لا يمكنك التحويل إلى نفسك أو إلى بوت.", delete_after=8)
-                        return
-                    fee = max(1, int((amount * 0.05) + 0.999999))
-                    total = amount + fee
-                    balance = await self.db.get_balance(message.author.id)
-                    if balance < total:
-                        await message.channel.send(f"❌ رصيدك غير كافٍ. تحتاج **{total:,} ANOCoin**، ورصيدك الحالي **{balance:,} ANOCoin**.", delete_after=10)
-                        return
-                    confirmed = await economy._confirm(message.channel, message.author, message.guild.id, "التحويل")
-                    if not confirmed:
-                        return
-                    ok, text = await economy._transfer_amount(message.guild, message.author, member, amount)
-                    if ok:
-                        await message.channel.send(text)
-                    return
         await self.process_commands(message)
+
+    async def on_command_error(self, ctx: commands.Context, error: commands.CommandError):
+        self.logger.error(f"Prefix command error command={getattr(ctx.command, 'qualified_name', 'unknown')} guild={getattr(ctx.guild, 'id', None)} user={ctx.author.id}", exc_info=(type(error), error, error.__traceback__))
+        if not isinstance(error, commands.CommandNotFound):
+            await ctx.send("❌ وقع خطأ أثناء تنفيذ الأمر. تم تسجيل التفاصيل.", delete_after=8)
+
+    async def _tree_error(self, interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+        command = getattr(getattr(interaction, "command", None), "qualified_name", "unknown")
+        self.logger.error(f"Application command error command={command} guild={interaction.guild_id} user={interaction.user.id}", exc_info=(type(error), error, error.__traceback__))
+        text = "❌ وقع خطأ أثناء تنفيذ الأمر. تم تسجيل التفاصيل."
+        if interaction.response.is_done():
+            await interaction.followup.send(text, ephemeral=True)
+        else:
+            await interaction.response.send_message(text, ephemeral=True)
 
     async def on_ready(self):
         types = {"playing": discord.ActivityType.playing, "watching": discord.ActivityType.watching, "listening": discord.ActivityType.listening, "streaming": discord.ActivityType.streaming}
