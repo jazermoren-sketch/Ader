@@ -1,5 +1,6 @@
 """Ader Ultimate Discord bot entry point."""
 import asyncio
+import math
 import os
 from pathlib import Path
 from datetime import timedelta
@@ -20,6 +21,7 @@ try:
 except ImportError:
     fcntl = None
 
+
 class Ader(commands.Bot):
     TARGET_GUILD_ID = 1490355290116194388
 
@@ -30,6 +32,7 @@ class Ader(commands.Bot):
         intents.presences = True
         configured_prefix = config.get("bot", {}).get("prefix", "!")
         prefixes = [configured_prefix] if isinstance(configured_prefix, str) else [str(p) for p in configured_prefix] if isinstance(configured_prefix, (list, tuple)) else ["!"]
+        prefixes = [p for p in prefixes if p.strip().lower() != "a"]
         if "!" not in prefixes:
             prefixes.append("!")
         prefixes = list(dict.fromkeys(prefixes))
@@ -39,8 +42,6 @@ class Ader(commands.Bot):
         self.config = config
         self.start_time = discord.utils.utcnow()
         self.logger = BotLogger(config.get("logging", {}))
-        # Hosting providers commonly replace the checkout on deploy.  Keep the
-        # database outside it whenever ADER_DATA_DIR is supplied.
         configured_db = Path(config.get("database", {}).get("sqlite_path", "data/ader.sqlite3"))
         data_dir = os.getenv("ADER_DATA_DIR", "").strip()
         db_path = Path(data_dir) / configured_db.name if data_dir else configured_db
@@ -82,9 +83,6 @@ class Ader(commands.Bot):
         await self.load_cogs()
 
     async def load_cogs(self):
-        # This explicit release manifest is the single source of truth.  Do not
-        # discover files alphabetically: that used to load hotfixes and duplicate
-        # implementations beside their canonical cogs.
         extensions = (
             "cogs.admin", "cogs.analytics", "cogs.economy", "cogs.shop",
             "cogs.advertising_shop", "cogs.ad_customization", "cogs.shortcuts",
@@ -134,8 +132,64 @@ class Ader(commands.Bot):
                     return
         await super().on_interaction(interaction)
 
+    async def _handle_a_message(self, message: discord.Message) -> bool:
+        if message.guild is None:
+            return False
+        raw = message.content.strip()
+        parts = raw.split()
+        if not parts or parts[0].lower() != "a":
+            return False
+        if len(parts) > 3:
+            await message.channel.send("❌ الاستعمال: `A` أو `A @العضو` أو `A @العضو المبلغ`", delete_after=8)
+            return True
+        economy = self.get_cog("Economy")
+        if economy is None:
+            await message.channel.send("❌ نظام الاقتصاد غير متوفر حالياً.", delete_after=8)
+            return True
+        mentions = list(message.mentions)
+        if len(mentions) > 1:
+            await message.channel.send("❌ يرجى تحديد عضو واحد فقط.", delete_after=8)
+            return True
+        if len(mentions) == 0:
+            if len(parts) == 1:
+                balance = await self.db.get_balance(message.author.id)
+                await message.channel.send(embed=discord.Embed(title="🪙 رصيدك", description=f"رصيدك الحالي: **{balance:,} ANORIS**", colour=discord.Colour.gold()))
+            else:
+                await message.channel.send("❌ الاستعمال: `A` أو `A @العضو` أو `A @العضو المبلغ`", delete_after=8)
+            return True
+
+        member = mentions[0]
+        amount = None
+        if len(parts) == 3:
+            try:
+                amount = int(parts[-1].replace(",", ""))
+            except ValueError:
+                await message.channel.send("❌ المبلغ يجب أن يكون رقماً صحيحاً.", delete_after=8)
+                return True
+        if amount is None:
+            balance = await self.db.get_balance(member.id)
+            await message.channel.send(embed=discord.Embed(title=f"🪙 رصيد {member.display_name}", description=f"رصيد {member.mention}: **{balance:,} ANORIS**", colour=discord.Colour.gold()))
+            return True
+        if amount <= 0 or member.bot or member.id == message.author.id:
+            await message.channel.send("❌ يجب تحديد مبلغ موجب وعضو آخر غير البوتات.", delete_after=8)
+            return True
+        balance = await self.db.get_balance(message.author.id)
+        fee = max(1, math.ceil(amount * 0.05))
+        total = amount + fee
+        if balance < total:
+            await message.channel.send(f"❌ رصيدك غير كافٍ. تحتاج **{total:,} ANORIS** ورصيدك الحالي **{balance:,} ANORIS**.", delete_after=10)
+            return True
+        confirmed = await economy._confirm(message.channel, message.author, message.guild.id, "التحويل")
+        if not confirmed:
+            return True
+        ok, text = await economy._transfer_amount(message.guild, message.author, member, amount)
+        await message.channel.send(text if ok else text, delete_after=None if ok else 10)
+        return True
+
     async def on_message(self, message: discord.Message):
         if message.author.bot:
+            return
+        if await self._handle_a_message(message):
             return
         await self.process_commands(message)
 
