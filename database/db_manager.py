@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import aiosqlite
+
+
+logger = logging.getLogger("Ader.database")
 
 
 class DatabaseManager:
@@ -167,8 +171,12 @@ class DatabaseManager:
             if column not in existing:
                 await self.connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
+        # This must happen before any uniqueness enforcement.  Older releases
+        # permitted duplicate logical users, so a direct CREATE UNIQUE INDEX
+        # prevented the bot from starting on a persistent database.
+        await self._deduplicate_users_and_enforce_identity()
+
         await self.connection.executescript("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_guild_user ON users(guild_id, user_id);
         CREATE INDEX IF NOT EXISTS idx_analytics_guild_time ON analytics(guild_id, timestamp DESC);
         CREATE INDEX IF NOT EXISTS idx_ad_rooms_guild_owner ON ad_rooms(guild_id, owner_id, active);
         CREATE INDEX IF NOT EXISTS idx_ad_giveaways_due ON ad_giveaways(ended, ends_at);
@@ -180,6 +188,114 @@ class DatabaseManager:
                SELECT user_id, 0, MIN(created_at) FROM users GROUP BY user_id"""
         )
         await self.connection.commit()
+        logger.info("SQLite migration completed successfully")
+
+    async def _deduplicate_users_and_enforce_identity(self) -> None:
+        """Merge legacy duplicate user rows before creating the composite index.
+
+        The table has no surrogate key in older databases, therefore SQLite's
+        rowid is used solely to retain one canonical physical row per identity.
+        This is transactional and is a no-op after the first clean migration.
+        """
+        assert self.connection is not None
+        schema = await self.fetchall("PRAGMA table_info(users)")
+        indexes = await self.fetchall("PRAGMA index_list(users)")
+        columns = [(str(row[1]), str(row[2] or "")) for row in schema]
+        names = [name for name, _kind in columns]
+        logger.info("users schema inspected: columns=%d indexes=%d", len(columns), len(indexes))
+        duplicates = await self.fetchall(
+            "SELECT guild_id,user_id,COUNT(*) AS count FROM users "
+            "GROUP BY guild_id,user_id HAVING COUNT(*) > 1"
+        )
+        logger.info("users duplicate groups found: %d", len(duplicates))
+        merged = removed = 0
+        try:
+            await self.connection.execute("BEGIN IMMEDIATE")
+            for group in duplicates:
+                rows = await (await self.connection.execute(
+                    "SELECT rowid AS _ader_rowid, * FROM users WHERE guild_id=? AND user_id=? "
+                    "ORDER BY COALESCE(created_at, 0) DESC, rowid DESC",
+                    (group["guild_id"], group["user_id"]),
+                )).fetchall()
+                canonical = dict(rows[0])
+                for name, kind in columns:
+                    values = [row[name] for row in rows]
+                    lowered = name.lower()
+                    if name in {"guild_id", "user_id"}:
+                        continue
+                    if lowered == "created_at":
+                        valid = [value for value in values if value is not None]
+                        if valid:
+                            canonical[name] = min(valid)
+                    elif lowered in {"updated_at", "last_daily", "last_seen", "last_message_at"}:
+                        valid = [value for value in values if value is not None]
+                        if valid:
+                            canonical[name] = max(valid)
+                    elif lowered in {"xp", "balance", "points", "message_count", "messages", "ticket_count", "advertisement_count", "ad_count"}:
+                        canonical[name] = sum(int(value or 0) for value in values)
+                    elif lowered in {"level", "rank"}:
+                        canonical[name] = max(int(value or 0) for value in values)
+                    elif lowered in {"inventory", "warnings"}:
+                        merged_values = []
+                        for value in values:
+                            try:
+                                parsed = json.loads(value or "[]")
+                            except (TypeError, json.JSONDecodeError):
+                                parsed = []
+                            if isinstance(parsed, list):
+                                merged_values.extend(parsed)
+                        canonical[name] = json.dumps(merged_values, ensure_ascii=False)
+                    elif canonical.get(name) in (None, ""):
+                        canonical[name] = next((value for value in values if value not in (None, "")), canonical.get(name))
+
+                assignments = ", ".join(f'"{name}"=?' for name in names if name not in {"guild_id", "user_id"})
+                values = [canonical.get(name) for name in names if name not in {"guild_id", "user_id"}]
+                values.append(canonical["_ader_rowid"])
+                await self.connection.execute(f"UPDATE users SET {assignments} WHERE rowid=?", tuple(values))
+                redundant = [row["_ader_rowid"] for row in rows[1:]]
+                placeholders = ",".join("?" for _ in redundant)
+                await self.connection.execute(f"DELETE FROM users WHERE rowid IN ({placeholders})", tuple(redundant))
+                merged += 1
+                removed += len(redundant)
+
+            verify = await (await self.connection.execute(
+                "SELECT 1 FROM users GROUP BY guild_id,user_id HAVING COUNT(*) > 1 LIMIT 1"
+            )).fetchone()
+            if verify is not None:
+                raise RuntimeError("users duplicate verification failed; uniqueness was not enforced")
+            await self.connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_guild_user_unique ON users(guild_id, user_id)"
+            )
+            await self.connection.commit()
+        except Exception:
+            await self.connection.rollback()
+            raise
+        logger.info("users duplicate rows merged: groups=%d rows_removed=%d unique_index=created_or_present", merged, removed)
+
+    async def get_analytics(self, guild_id: int | None = None, limit: int = 100, event_type: str | None = None) -> List[Dict[str, Any]]:
+        """Return analytics without relying on legacy runtime monkey patches."""
+        clauses, params = [], []
+        if guild_id is not None:
+            clauses.append("guild_id=?")
+            params.append(int(guild_id))
+        if event_type:
+            clauses.append("type=?")
+            params.append(str(event_type))
+        limit = max(1, min(int(limit), 1000))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = await self.fetchall(f"SELECT id,guild_id,type,timestamp,data FROM analytics{where} ORDER BY timestamp DESC LIMIT ?", tuple(params + [limit]))
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["data"] = json.loads(item["data"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                item["data"] = {}
+            result.append(item)
+        return result
+
+    async def record_analytics(self, guild_id: int | None, event_type: str, data: Dict[str, Any] | None = None) -> None:
+        await self.execute("INSERT INTO analytics(guild_id,type,timestamp,data) VALUES(?,?,?,?)", (guild_id, event_type, time.time(), json.dumps(data or {}, ensure_ascii=False)))
 
     async def get_analytics(self, guild_id: int | None = None, limit: int = 100, event_type: str | None = None) -> List[Dict[str, Any]]:
         """Return analytics without relying on legacy runtime monkey patches."""
