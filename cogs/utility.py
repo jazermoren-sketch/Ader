@@ -91,7 +91,10 @@ class Utility(commands.Cog):
         self.bot = bot
         self.db = db
         self.config = config
-        self.reminders_task = self.bot.loop.create_task(self.check_reminders())
+        self.reminders_task = None
+
+    async def cog_load(self):
+        self.reminders_task = asyncio.create_task(self.check_reminders())
 
     def cog_unload(self):
         """Cleanup on cog unload"""

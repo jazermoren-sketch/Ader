@@ -40,7 +40,9 @@ LEVELING = {
 
 def calculate_level_xp(level: int) -> int:
     """Calculate XP required for level"""
-    return int(LEVELING["base_xp"] * (level ** LEVELING["xp_multiplier"]))
+    # Level zero is the starting state, but callers still need a positive
+    # threshold when rendering progress rather than a zero-width bar.
+    return int(LEVELING["base_xp"] * (max(1, level) ** LEVELING["xp_multiplier"]))
 
 # Economy Constants
 ECONOMY = {

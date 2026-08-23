@@ -44,6 +44,8 @@ class ShortcutSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
+        if not self.cog.can_manage(interaction):
+            return await interaction.response.send_message("❌ تحتاج إلى Manage Server أو Administrator.", ephemeral=True)
         await self.cog.show_editor(interaction, self.values[0], self.hidden)
 
 
@@ -67,6 +69,8 @@ class EditAliasButton(discord.ui.Button):
         self.cog, self.key, self.hidden = cog, key, hidden
 
     async def callback(self, interaction: discord.Interaction):
+        if not self.cog.can_manage(interaction):
+            return await interaction.response.send_message("❌ تحتاج إلى Manage Server أو Administrator.", ephemeral=True)
         await interaction.response.send_modal(
             AliasModal(self.cog, self.key, self.cog.get_alias(interaction.guild.id, self.key), self.hidden)
         )
@@ -78,6 +82,8 @@ class BackButton(discord.ui.Button):
         self.cog, self.hidden = cog, hidden
 
     async def callback(self, interaction: discord.Interaction):
+        if not self.cog.can_manage(interaction):
+            return await interaction.response.send_message("❌ تحتاج إلى Manage Server أو Administrator.", ephemeral=True)
         await interaction.response.edit_message(
             embed=self.cog.selector_embed(), view=ShortcutView(self.cog, self.hidden)
         )
@@ -92,6 +98,8 @@ class AliasModal(discord.ui.Modal, title="تعديل الاختصار"):
         self.alias.default = current
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not self.cog.can_manage(interaction):
+            return await interaction.response.send_message("❌ تحتاج إلى Manage Server أو Administrator.", ephemeral=True)
         value = self.alias.value.strip()
         value = value if value.startswith("!") else "!" + value
         if len(value) < 2 or " " in value:
@@ -125,6 +133,11 @@ class Shortcuts(commands.Cog):
         self.data.setdefault(str(guild_id), {})[key] = value
         self.save()
 
+    @staticmethod
+    def can_manage(interaction: discord.Interaction) -> bool:
+        permissions = getattr(interaction.user, "guild_permissions", None)
+        return bool(interaction.guild and permissions and (permissions.administrator or permissions.manage_guild))
+
     def selector_embed(self):
         embed = discord.Embed(
             title="اختر الاختصار الذي تود التعديل عليه",
@@ -140,7 +153,7 @@ class Shortcuts(commands.Cog):
         """لوحة إعداد اختصارات الإدارة."""
         if not interaction.guild:
             return await interaction.response.send_message("❌ هذا الأمر خاص بالسيرفرات.", ephemeral=True)
-        if not (interaction.user.guild_permissions.manage_guild or interaction.user.guild_permissions.administrator):
+        if not self.can_manage(interaction):
             return await interaction.response.send_message(
                 "❌ تحتاج إلى Manage Server أو Administrator.", ephemeral=True
             )

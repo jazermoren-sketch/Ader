@@ -225,8 +225,25 @@ class PrefixAdView(discord.ui.View):
     async def pick(self, interaction, mention):
         if interaction.user.id != self.actor_id:
             return await interaction.response.send_message("❌ هذا التحكم ليس لك.", ephemeral=True)
+        await interaction.response.edit_message(
+            content=f"{interaction.guild.get_member(self.owner_id).mention if interaction.guild else ''}\nاضغط لكتابة إعلانك.",
+            view=WriteAdView(self.cog, self.owner_id, self.channel_id, mention, self.control_message_id),
+        )
+
+
+class WriteAdView(discord.ui.View):
+    """The owner-bound final step of an administrator-created ad session."""
+    def __init__(self, cog, owner_id: int, channel_id: int, mention: str, control_message_id: int | None):
+        super().__init__(timeout=120)
+        self.cog, self.owner_id, self.channel_id = cog, owner_id, channel_id
+        self.mention, self.control_message_id = mention, control_message_id
+
+    @discord.ui.button(label="اكتب إعلانك", emoji="📢", style=discord.ButtonStyle.primary)
+    async def write(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if interaction.user.id != self.owner_id:
+            return await interaction.response.send_message("❌ فقط صاحب الروم يمكنه كتابة الإعلان.", ephemeral=True)
         await interaction.response.send_modal(
-            AdModal(self.cog, self.owner_id, self.channel_id, mention, self.actor_id, self.control_message_id)
+            AdModal(self.cog, self.owner_id, self.channel_id, self.mention, self.owner_id, self.control_message_id)
         )
 
 
@@ -241,72 +258,46 @@ class AdvertisingShop(commands.Cog):
         return int(message.id) if message else None
 
     async def cog_load(self):
-        await self.db.execute("CREATE TABLE IF NOT EXISTS ad_rooms(guild_id INTEGER NOT NULL,channel_id INTEGER PRIMARY KEY,owner_id INTEGER NOT NULL,mention_type TEXT NOT NULL,template TEXT NOT NULL DEFAULT 'مرحباً بك في روم الإعلانات الخاص بك.',image_path TEXT,panel_message_id INTEGER,active INTEGER NOT NULL DEFAULT 1)")
-        await self.db.execute("CREATE TABLE IF NOT EXISTS ad_settings(guild_id INTEGER PRIMARY KEY,allowed_roles TEXT NOT NULL DEFAULT '[]')")
-        await self.db.execute("CREATE TABLE IF NOT EXISTS ad_settings_v2(guild_id INTEGER PRIMARY KEY,post_message TEXT NOT NULL DEFAULT '',giveaway_enabled INTEGER NOT NULL DEFAULT 0,giveaway_amount INTEGER NOT NULL DEFAULT 3000000,giveaway_duration INTEGER NOT NULL DEFAULT 3600,giveaway_sponsor_id INTEGER,image_path TEXT,updated_at REAL NOT NULL DEFAULT 0,required_guild_id INTEGER)")
-        for col, definition in (("required_guild_id", "INTEGER"),):
-            columns = {str(x[1]) for x in await self.db.fetchall("PRAGMA table_info(ad_settings_v2)")}
-            if col not in columns:
-                await self.db.execute(f"ALTER TABLE ad_settings_v2 ADD COLUMN {col} {definition}")
-        await self.db.execute("CREATE TABLE IF NOT EXISTS ad_giveaways(id INTEGER PRIMARY KEY AUTOINCREMENT,guild_id INTEGER NOT NULL,channel_id INTEGER NOT NULL,owner_id INTEGER NOT NULL,amount INTEGER NOT NULL,ends_at REAL NOT NULL,ended INTEGER NOT NULL DEFAULT 0,winner_id INTEGER,required_guild_id INTEGER)")
-        for col, definition in (("required_guild_id", "INTEGER"), ("message_id", "INTEGER")):
-            columns = {str(x[1]) for x in await self.db.fetchall("PRAGMA table_info(ad_giveaways)")}
-            if col not in columns:
-                await self.db.execute(f"ALTER TABLE ad_giveaways ADD COLUMN {col} {definition}")
-        await self.db.execute("CREATE TABLE IF NOT EXISTS ad_giveaway_entries(giveaway_id INTEGER NOT NULL,user_id INTEGER NOT NULL,PRIMARY KEY(giveaway_id,user_id))")
         for row in await self.db.fetchall("SELECT * FROM ad_rooms WHERE active=1"):
             self.bot.add_view(AdPanel(self, int(row["owner_id"]), int(row["channel_id"]), str(row["mention_type"])))
         for row in await self.db.fetchall("SELECT id FROM ad_giveaways WHERE ended=0"):
             self.bot.add_view(GiveawayView(self, int(row["id"])))
-        self._patch_shop()
+        self.bot.ad_delivery_handler = self.deliver_shop_item
 
     def cog_unload(self):
         self.worker.cancel()
 
-    def _patch_shop(self):
-        shop = self.bot.get_cog("Shop")
-        if not shop or getattr(shop, "_ader_ad_delivery", False):
-            return
-        original = shop._purchase
-
-        async def purchase(guild_id, user_id, item_id):
-            ok, text = await original(guild_id, user_id, item_id)
-            if not ok:
-                return ok, text
-            item = await self.db.fetchone("SELECT * FROM shop WHERE guild_id=? AND id=?", (guild_id, item_id))
-            try:
-                data = json.loads(item["data"] or "{}")
-            except Exception:
-                data = {}
-            delivery = data.get("delivery") or {}
-            if delivery.get("type") != "ad_room":
-                return ok, text
-            guild = self.bot.get_guild(guild_id)
-            member = guild.get_member(user_id) if guild else None
-            if not guild or not member:
-                return False, "❌ تعذر تسليم المنتج."
-            if not guild.me.guild_permissions.manage_channels:
-                await self.db.add_balance(user_id, guild_id, int(item["price"]))
-                return False, "❌ البوت يحتاج Manage Channels؛ تمت إعادة المبلغ."
-            private = delivery.get("visibility") == "private"
-            overwrites = {
+    async def deliver_shop_item(self, guild_id, user_id, item):
+        try:
+            data = json.loads(item["data"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            data = {}
+        delivery = data.get("delivery") or {}
+        if delivery.get("type") != "ad_room":
+            return True, ""
+        guild = self.bot.get_guild(guild_id)
+        member = guild.get_member(user_id) if guild else None
+        if not guild or not member:
+            return False, "❌ تعذر تسليم المنتج."
+        if not guild.me.guild_permissions.manage_channels:
+            await self.db.add_balance(user_id, guild_id, int(item["price"]))
+            return False, "❌ البوت يحتاج Manage Channels؛ تمت إعادة المبلغ."
+        private = delivery.get("visibility") == "private"
+        overwrites = {
                 guild.default_role: discord.PermissionOverwrite(view_channel=not private, send_messages=False, read_message_history=True),
                 member: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True, embed_links=True, read_message_history=True),
                 guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, manage_messages=True, attach_files=True, embed_links=True, read_message_history=True),
-            }
-            try:
-                channel = await guild.create_text_channel(clean_name(f"ad-{member.display_name}"), category=None, overwrites=overwrites, reason="Ader shop advertising room")
-            except (discord.Forbidden, discord.HTTPException):
-                await self.db.add_balance(user_id, guild_id, int(item["price"]))
-                return False, "❌ تعذر إنشاء الروم؛ تمت إعادة المبلغ."
-            mention = delivery.get("mention_type", "everyone")
-            await self.db.execute("INSERT INTO ad_rooms(guild_id,channel_id,owner_id,mention_type) VALUES(?,?,?,?)", (guild_id, channel.id, user_id, mention))
-            await channel.send(member.mention, allowed_mentions=discord.AllowedMentions(users=True))
-            await self.render_panel(channel)
-            return True, text + f"\n🏠 تم تسليم الروم: {channel.mention}"
-
-        shop._purchase = purchase
-        shop._ader_ad_delivery = True
+        }
+        try:
+            channel = await guild.create_text_channel(clean_name(f"ad-{member.display_name}"), category=None, overwrites=overwrites, reason="Ader shop advertising room")
+        except (discord.Forbidden, discord.HTTPException):
+            await self.db.add_balance(user_id, guild_id, int(item["price"]))
+            return False, "❌ تعذر إنشاء الروم؛ تمت إعادة المبلغ."
+        mention = delivery.get("mention_type", "everyone")
+        await self.db.execute("INSERT INTO ad_rooms(guild_id,channel_id,owner_id,mention_type) VALUES(?,?,?,?)", (guild_id, channel.id, user_id, mention))
+        await channel.send(member.mention, allowed_mentions=discord.AllowedMentions(users=True))
+        await self.render_panel(channel)
+        return True, f"🏠 تم تسليم الروم: {channel.mention}"
 
     async def render_panel(self, channel):
         if not isinstance(channel, discord.TextChannel):
@@ -365,12 +356,14 @@ class AdvertisingShop(commands.Cog):
         if not rows:
             return await ctx.reply("❌ هذا العضو لا يملك أي روم إعلان نشطاً.", mention_author=False)
         if len(rows) == 1:
-            await ctx.reply(
+            view = PrefixAdView(self, ctx.author.id, member.id, int(rows[0]["channel_id"]))
+            control = await ctx.reply(
                 f"{member.mention}\n**اختر نوع المنشن حق الروم**",
                 mention_author=False,
-                view=PrefixAdView(self, ctx.author.id, member.id, int(rows[0]["channel_id"])),
+                view=view,
                 allowed_mentions=discord.AllowedMentions(users=True),
             )
+            view.control_message_id = control.id
             return
         message = await ctx.reply(
             f"{member.mention}\n**اختار روم الإعلان اللي بغيتي تنشر فيه**",

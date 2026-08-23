@@ -75,25 +75,25 @@ class BotLogger:
             date_format=config.get("date_format", "%Y-%m-%d %H:%M:%S")
         )
 
-    def debug(self, message: str) -> None:
+    def debug(self, message: str, *args, **kwargs) -> None:
         """Log debug message"""
-        self.logger.debug(message)
+        self.logger.debug(message, *args, **kwargs)
 
-    def info(self, message: str) -> None:
+    def info(self, message: str, *args, **kwargs) -> None:
         """Log info message"""
-        self.logger.info(message)
+        self.logger.info(message, *args, **kwargs)
 
-    def warning(self, message: str) -> None:
+    def warning(self, message: str, *args, **kwargs) -> None:
         """Log warning message"""
-        self.logger.warning(message)
+        self.logger.warning(message, *args, **kwargs)
 
-    def error(self, message: str, exc_info: bool = False) -> None:
+    def error(self, message: str, *args, exc_info=False, **kwargs) -> None:
         """Log error message"""
-        self.logger.error(message, exc_info=exc_info)
+        self.logger.error(message, *args, exc_info=exc_info, **kwargs)
 
-    def critical(self, message: str, exc_info: bool = False) -> None:
+    def critical(self, message: str, *args, exc_info=False, **kwargs) -> None:
         """Log critical message"""
-        self.logger.critical(message, exc_info=exc_info)
+        self.logger.critical(message, *args, exc_info=exc_info, **kwargs)
 
     def command(self, user: str, command: str, guild: str) -> None:
         """Log command execution"""
