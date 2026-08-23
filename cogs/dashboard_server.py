@@ -1,9 +1,4 @@
-"""Ader's canonical FastAPI dashboard server.
-
-The dashboard shares the running Discord bot instance and the same SQLite
-DatabaseManager. The frontend is served from a self-contained FastAPI app,
-so no separate Node/Vite process or static build is required.
-"""
+"""Ader's canonical FastAPI dashboard server."""
 from __future__ import annotations
 
 import asyncio
@@ -77,7 +72,7 @@ class DashboardServer(commands.Cog):
         await self._migrate_dashboard()
         try:
             import uvicorn
-            from web.dashboard_app import create_app
+            from web.dashboard_fixed_app import create_app
         except Exception as exc:
             self.log.error("Dashboard dependencies are unavailable: %s", exc, exc_info=True)
             return
