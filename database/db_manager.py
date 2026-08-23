@@ -297,6 +297,31 @@ class DatabaseManager:
     async def record_analytics(self, guild_id: int | None, event_type: str, data: Dict[str, Any] | None = None) -> None:
         await self.execute("INSERT INTO analytics(guild_id,type,timestamp,data) VALUES(?,?,?,?)", (guild_id, event_type, time.time(), json.dumps(data or {}, ensure_ascii=False)))
 
+    async def get_analytics(self, guild_id: int | None = None, limit: int = 100, event_type: str | None = None) -> List[Dict[str, Any]]:
+        """Return analytics without relying on legacy runtime monkey patches."""
+        clauses, params = [], []
+        if guild_id is not None:
+            clauses.append("guild_id=?")
+            params.append(int(guild_id))
+        if event_type:
+            clauses.append("type=?")
+            params.append(str(event_type))
+        limit = max(1, min(int(limit), 1000))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = await self.fetchall(f"SELECT id,guild_id,type,timestamp,data FROM analytics{where} ORDER BY timestamp DESC LIMIT ?", tuple(params + [limit]))
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["data"] = json.loads(item["data"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                item["data"] = {}
+            result.append(item)
+        return result
+
+    async def record_analytics(self, guild_id: int | None, event_type: str, data: Dict[str, Any] | None = None) -> None:
+        await self.execute("INSERT INTO analytics(guild_id,type,timestamp,data) VALUES(?,?,?,?)", (guild_id, event_type, time.time(), json.dumps(data or {}, ensure_ascii=False)))
+
     async def execute(self, sql: str, params: tuple = ()):
         cur = await self.connection.execute(sql, params)
         await self.connection.commit()
