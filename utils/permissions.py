@@ -1,12 +1,10 @@
 """
 Permission checks and utilities for Logiq.
 
-Permission checks must tolerate Discord interactions where the Member object is
-partially resolved. In that case ``Member.guild_permissions`` and ``top_role``
-can raise while trying to resolve uncached/deleted roles, so interaction-level
-permissions and explicit role-position fallbacks are used.
+Permission checks tolerate partially resolved Discord members and stale/deleted
+role IDs. Interaction-level permissions are preferred, and moderation hierarchy
+falls back to explicit cached role positions when Member.top_role is unusable.
 """
-
 from __future__ import annotations
 
 from typing import Optional
@@ -15,31 +13,24 @@ import discord
 from discord import app_commands
 
 
-async def _get_interaction_permissions(
-    interaction: discord.Interaction,
-) -> Optional[discord.Permissions]:
-    """Return reliable permissions for a guild interaction without crashing."""
+async def _get_interaction_permissions(interaction: discord.Interaction) -> Optional[discord.Permissions]:
     if interaction.guild is None:
         return None
-
     perms = getattr(interaction, "permissions", None)
     if perms is not None:
         return perms
-
     member = interaction.user
     try:
         if isinstance(member, discord.Member):
             return member.guild_permissions
     except (AttributeError, TypeError):
         pass
-
     cached_member = interaction.guild.get_member(interaction.user.id)
     if cached_member is not None:
         try:
             return cached_member.guild_permissions
         except (AttributeError, TypeError):
             pass
-
     try:
         fetched_member = await interaction.guild.fetch_member(interaction.user.id)
         return fetched_member.guild_permissions
@@ -48,7 +39,6 @@ async def _get_interaction_permissions(
 
 
 def is_admin():
-    """Check if user has Administrator permission."""
     async def predicate(interaction: discord.Interaction) -> bool:
         perms = await _get_interaction_permissions(interaction)
         return bool(perms and perms.administrator)
@@ -71,44 +61,34 @@ _MODERATION_PERMISSIONS = {
 
 
 def is_moderator():
-    """Require the minimum Discord permission for each moderation command."""
     async def predicate(interaction: discord.Interaction) -> bool:
         perms = await _get_interaction_permissions(interaction)
         if perms is None:
             return False
         if perms.administrator:
             return True
-
         command = getattr(interaction, "command", None)
-        command_name = getattr(command, "name", None)
-        required = _MODERATION_PERMISSIONS.get(command_name)
-        if required is None:
-            return False
-        return bool(getattr(perms, required, False))
+        required = _MODERATION_PERMISSIONS.get(getattr(command, "name", None))
+        return bool(required and getattr(perms, required, False))
 
     def decorator(command):
         command_name = getattr(command, "name", None) or getattr(command, "__name__", "")
         required = _MODERATION_PERMISSIONS.get(command_name)
-
         if required:
             command = app_commands.default_permissions(**{required: True})(command)
         else:
             command = app_commands.default_permissions(administrator=True)(command)
-
         return app_commands.check(predicate)(command)
-
     return decorator
 
 
 def has_role(role_id: int):
-    """Check if user has specific role."""
     async def predicate(interaction: discord.Interaction) -> bool:
         return any(role.id == role_id for role in getattr(interaction.user, "roles", []))
     return app_commands.check(predicate)
 
 
 def bot_has_permissions(**perms):
-    """Check if bot has required permissions."""
     async def predicate(interaction: discord.Interaction) -> bool:
         if not interaction.guild or not interaction.guild.me:
             return False
@@ -121,52 +101,47 @@ def bot_has_permissions(**perms):
 
 
 def is_guild_owner():
-    """Check if user is guild owner."""
     async def predicate(interaction: discord.Interaction) -> bool:
         return bool(interaction.guild and interaction.user.id == interaction.guild.owner_id)
     return app_commands.check(predicate)
 
 
 class PermissionChecker:
-    """Utility class for permission checking."""
-
     @staticmethod
     def _highest_role_position(member: discord.Member) -> int:
-        """Return a safe highest role position even with stale role IDs."""
         guild = getattr(member, "guild", None)
         if guild is None:
             return 0
-        highest = int(getattr(guild.default_role, "position", 0) or 0)
+        highest = int(getattr(getattr(guild, "default_role", None), "position", 0) or 0)
         for role_id in getattr(member, "_roles", ()):
+            try:
+                role_id = int(role_id)
+            except (TypeError, ValueError):
+                continue
             role = guild.get_role(role_id)
             if role is not None:
                 highest = max(highest, int(getattr(role, "position", 0) or 0))
         return highest
 
     @staticmethod
-    def check_hierarchy(
-        executor: discord.Member,
-        target: discord.Member,
-    ) -> bool:
-        """Check if executor is higher in role hierarchy than target safely."""
+    def check_hierarchy(executor: discord.Member, target: discord.Member) -> bool:
         if executor.guild.id != target.guild.id:
             return False
         if executor.guild.owner_id == executor.id:
             return True
         if target.guild.owner_id == target.id:
             return False
-
         try:
-            return executor.top_role > target.top_role
+            executor_role = executor.top_role
+            target_role = target.top_role
+            if executor_role is not None and target_role is not None:
+                return executor_role > target_role
         except (AttributeError, TypeError):
-            return PermissionChecker._highest_role_position(executor) > PermissionChecker._highest_role_position(target)
+            pass
+        return PermissionChecker._highest_role_position(executor) > PermissionChecker._highest_role_position(target)
 
     @staticmethod
-    def can_moderate(
-        moderator: discord.Member,
-        target: discord.Member,
-    ) -> tuple[bool, Optional[str]]:
-        """Check whether a moderator can act on a target."""
+    def can_moderate(moderator: discord.Member, target: discord.Member) -> tuple[bool, Optional[str]]:
         if moderator.id == target.id:
             return False, "You cannot moderate yourself"
         if target.guild.owner_id == target.id:
@@ -176,23 +151,12 @@ class PermissionChecker:
         return True, None
 
     @staticmethod
-    def has_permission(
-        member: discord.Member,
-        permission: str,
-    ) -> bool:
-        """Check if member has a specific Discord permission."""
+    def has_permission(member: discord.Member, permission: str) -> bool:
         try:
             return bool(getattr(member.guild_permissions, permission, False))
         except (AttributeError, TypeError):
             return False
 
     @staticmethod
-    def get_missing_permissions(
-        member: discord.Member,
-        required_permissions: list[str],
-    ) -> list[str]:
-        """Return required Discord permissions missing from a member."""
-        return [
-            perm for perm in required_permissions
-            if not PermissionChecker.has_permission(member, perm)
-        ]
+    def get_missing_permissions(member: discord.Member, required_permissions: list[str]) -> list[str]:
+        return [perm for perm in required_permissions if not PermissionChecker.has_permission(member, perm)]

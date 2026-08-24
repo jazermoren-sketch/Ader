@@ -1,0 +1,1 @@
+Dashboard hardening is implemented in web/dashboard_hardening.py.
