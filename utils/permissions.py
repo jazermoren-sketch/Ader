@@ -14,28 +14,59 @@ from discord import app_commands
 
 
 async def _get_interaction_permissions(interaction: discord.Interaction) -> Optional[discord.Permissions]:
+    """Resolve the effective permissions for an interaction reliably.
+
+    ``interaction.permissions`` is the authoritative permission snapshot sent
+    with an application command interaction. Falling back through the resolved
+    member/cache/API keeps checks working when ``interaction.user`` is a stale
+    or partially resolved Member object.
+    """
     if interaction.guild is None:
         return None
+
     perms = getattr(interaction, "permissions", None)
     if perms is not None:
         return perms
+
     member = interaction.user
     try:
         if isinstance(member, discord.Member):
             return member.guild_permissions
     except (AttributeError, TypeError):
         pass
+
     cached_member = interaction.guild.get_member(interaction.user.id)
     if cached_member is not None:
         try:
             return cached_member.guild_permissions
         except (AttributeError, TypeError):
             pass
+
     try:
         fetched_member = await interaction.guild.fetch_member(interaction.user.id)
         return fetched_member.guild_permissions
     except (discord.HTTPException, AttributeError, TypeError):
         return None
+
+
+async def can_manage_guild(interaction: discord.Interaction) -> bool:
+    """Return whether the interaction user may manage the current guild.
+
+    This is the single source of truth for commands that require either
+    Administrator or Manage Server. It intentionally uses the interaction's
+    effective Discord permission snapshot before relying on Member data, which
+    prevents false denials caused by stale Member role caches.
+    """
+    guild = interaction.guild
+    if guild is None:
+        return False
+
+    # Guild owners have full control regardless of role-cache state.
+    if getattr(interaction.user, "id", None) == guild.owner_id:
+        return True
+
+    perms = await _get_interaction_permissions(interaction)
+    return bool(perms and (perms.administrator or perms.manage_guild))
 
 
 def is_admin():
