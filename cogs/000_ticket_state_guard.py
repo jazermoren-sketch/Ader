@@ -32,7 +32,12 @@ class TicketStateGuard(commands.Cog):
             stale_ids: list[int] = []
             for row in rows:
                 guild = self.bot.get_guild(int(row["guild_id"]))
-                channel = guild.get_channel(int(row["channel_id"])) if guild else None
+                # During cog loading the Discord cache may not be ready yet.
+                # Never classify a ticket as stale merely because its guild is
+                # temporarily absent from cache; on_ready performs the repair.
+                if guild is None:
+                    continue
+                channel = guild.get_channel(int(row["channel_id"]))
                 if channel is None:
                     stale_ids.append(int(row["id"]))
 
@@ -50,15 +55,13 @@ class TicketStateGuard(commands.Cog):
             return len(stale_ids)
 
     async def cog_load(self) -> None:
-        # This repairs stale rows already present in persistent SQLite data.
-        try:
-            await self._cleanup_stale_open_tickets()
-        except Exception as exc:
-            print(f"[TicketStateGuard] startup cleanup error: {exc!r}")
+        # The actual persistent cleanup runs after Discord's cache is ready.
+        # This avoids changing valid tickets while guilds are still loading.
+        return None
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
-        # Run again after Discord's guild/channel cache is fully populated.
+        # Run once after Discord's guild/channel cache is fully populated.
         if self._ready_cleanup_done:
             return
         self._ready_cleanup_done = True
