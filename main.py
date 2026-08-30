@@ -89,6 +89,7 @@ class Ader(commands.Bot):
             "cogs.moderation", "cogs.roles", "cogs.ticket_manager", "cogs.utility",
             "cogs.verification", "cogs.games", "cogs.teams_v2",
             "cogs.temp_voice", "cogs.dashboard_config", "cogs.dashboard_server",
+            "cogs.owner_currency",
         )
         loaded, failed = [], []
         for extension in extensions:
@@ -258,12 +259,13 @@ def load_config():
 
 async def main():
     config = load_config()
+    bot = Ader(config)
     token = _get_discord_token(config)
-    await Ader(config).start(token)
+    try:
+        await bot.start(token)
+    finally:
+        await bot.close()
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    asyncio.run(main())
