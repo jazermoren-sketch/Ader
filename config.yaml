@@ -41,9 +41,8 @@ modules:
     currency_name: "ANORIS"
     currency_symbol: "🪙"
     starting_balance: 0
-    # Daily reward is intentionally substantial but still scarce.
-    # z_daily_fix enforces the 24-hour cooldown and uses this value as policy documentation.
-    daily_reward: 25000
+    # Daily reward: 30 ANORIS.
+    daily_reward: 30
     daily_cooldown: 86400
   tickets:
     enabled: true
@@ -57,6 +56,5 @@ web:
   name: "nova.hattena.com"
   public_url: "https://nova.hattena.com"
   host: "0.0.0.0"
-  # Quaxly/FeatherPanel can override this with SERVER_PORT, PORT or DASHBOARD_PORT.
   port: 8000
   cors_origins: ["https://nova.hattena.com"]
