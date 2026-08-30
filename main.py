@@ -89,7 +89,7 @@ class Ader(commands.Bot):
             "cogs.moderation", "cogs.roles", "cogs.ticket_manager", "cogs.utility",
             "cogs.verification", "cogs.games", "cogs.teams_v2",
             "cogs.temp_voice", "cogs.dashboard_config", "cogs.dashboard_server",
-            "cogs.owner_currency",
+            "cogs.owner_currency", "cogs.member_currency_reset",
         )
         loaded, failed = [], []
         for extension in extensions:
@@ -247,35 +247,3 @@ class Ader(commands.Bot):
         finally:
             self._release_instance_lock()
             await super().close()
-
-
-def _get_discord_token(config):
-    token = os.getenv("DISCORD_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
-    if not token:
-        configured = str(config.get("bot", {}).get("token", "") or "").strip()
-        token = os.getenv(configured[2:-1].strip(), "") if configured.startswith("${") and configured.endswith("}") else configured
-    token = (token or "").strip()
-    if token.lower().startswith("bot "):
-        token = token[4:].strip()
-    if not token or token.startswith("${"):
-        raise RuntimeError("Discord bot token is not configured. Set DISCORD_BOT_TOKEN in the hosting panel.")
-    return token
-
-
-def load_config():
-    with open("config.yaml", "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-async def main():
-    config = load_config()
-    bot = Ader(config)
-    token = _get_discord_token(config)
-    try:
-        await bot.start(token)
-    finally:
-        await bot.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
