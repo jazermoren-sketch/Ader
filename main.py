@@ -127,6 +127,12 @@ class Ader(commands.Bot):
             command = getattr(interaction, "command", None)
             if command is not None:
                 name = getattr(command, "qualified_name", None) or getattr(command, "name", "")
+                owner_currency = self.get_cog("OwnerCurrency")
+                command_cog = getattr(command, "binding", None)
+                if owner_currency is not None and getattr(command_cog, "__class__", None) is not None and command_cog.__class__.__name__ == "Economy":
+                    if await owner_currency._is_blacklisted(interaction.user.id):
+                        await self._dashboard_deny(interaction, "أنت في بلاك ليست العملة، ولا يمكنك استعمال نظام العملة.")
+                        return
                 allowed, reason = await self._dashboard_allowed(interaction.guild.id, name, interaction.user, getattr(interaction.channel, "id", None))
                 if not allowed:
                     await self._dashboard_deny(interaction, reason)
@@ -146,6 +152,10 @@ class Ader(commands.Bot):
         economy = self.get_cog("Economy")
         if economy is None:
             await message.channel.send("❌ نظام الاقتصاد غير متوفر حالياً.", delete_after=8)
+            return True
+        owner_currency = self.get_cog("OwnerCurrency")
+        if owner_currency is not None and await owner_currency._is_blacklisted(message.author.id):
+            await message.channel.send("❌ أنت في بلاك ليست العملة، ولا يمكنك استعمال نظام العملة.", delete_after=8)
             return True
         mentions = list(message.mentions)
         if len(mentions) > 1:
