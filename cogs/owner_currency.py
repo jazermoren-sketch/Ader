@@ -1,4 +1,4 @@
-"""Owner-only ANOCoin controls: currency blacklist and forced withdrawals."""
+"""Owner-only ANORIS controls and delegated bot-owner commands."""
 
 from __future__ import annotations
 
@@ -8,10 +8,12 @@ import discord
 from discord.ext import commands
 
 OWNER_ID = 1472570059367911587
+BLACKLIST_FINE = 25_000
+OWNER_MENTION = "<@1472570059367911587>"
 
 
 class OwnerCurrency(commands.Cog):
-    """Prefix-only currency administration restricted to the bot owner."""
+    """Prefix-only currency administration restricted to the bot owner or delegates."""
 
     def __init__(self, bot: commands.Bot, db, config: dict):
         self.bot = bot
@@ -21,6 +23,12 @@ class OwnerCurrency(commands.Cog):
     async def cog_load(self) -> None:
         await self.db.execute(
             """CREATE TABLE IF NOT EXISTS currency_blacklist (
+                user_id INTEGER PRIMARY KEY,
+                created_at REAL NOT NULL
+            )"""
+        )
+        await self.db.execute(
+            """CREATE TABLE IF NOT EXISTS owner_command_delegates (
                 user_id INTEGER PRIMARY KEY,
                 created_at REAL NOT NULL
             )"""
@@ -45,10 +53,19 @@ class OwnerCurrency(commands.Cog):
                 continue
             body = content[len(prefix):].strip()
             lowered = body.casefold()
-            for command_name in ("الغاء بلاك ليست", "بلاك ليست", "سحب"):
+            for command_name in ("الغاء بلاك ليست", "بلاك ليست", "سحب", "بوت"):
                 if lowered == command_name.casefold() or lowered.startswith(command_name.casefold() + " "):
                     return command_name, body[len(command_name):].strip()
         return None
+
+    async def _is_delegate(self, user_id: int) -> bool:
+        row = await self.db.fetchone(
+            "SELECT 1 FROM owner_command_delegates WHERE user_id=? LIMIT 1", (user_id,)
+        )
+        return row is not None
+
+    async def _is_authorized(self, user_id: int) -> bool:
+        return user_id == OWNER_ID or await self._is_delegate(user_id)
 
     async def _is_blacklisted(self, user_id: int) -> bool:
         row = await self.db.fetchone(
@@ -68,17 +85,38 @@ class OwnerCurrency(commands.Cog):
         if member.bot:
             await ctx.send("❌ لا يمكن وضع بوت في بلاك ليست العملة.", delete_after=8)
             return
+        if member.id == OWNER_ID:
+            await ctx.send("❌ لا يمكن وضع صاحب البوت في بلاك ليست العملة.", delete_after=8)
+            return
         if await self._is_blacklisted(member.id):
             await ctx.send(f"⚠️ {member.mention} موجود بالفعل في بلاك ليست العملة.", delete_after=8)
             return
+
+        balance = await self.db.get_balance(member.id)
+        if balance < BLACKLIST_FINE:
+            await ctx.send(
+                f"❌ لا يمكن إضافة {member.mention} إلى بلاك ليست العملة.\n"
+                f"الغرامة هي **{BLACKLIST_FINE:,} ANORIS** وتتحول إلى صاحب البوت {OWNER_MENTION}.\n"
+                f"رصيد العضو الحالي: **{balance:,} ANORIS**.",
+                delete_after=12,
+            )
+            return
+
+        if not await self.db.remove_balance(member.id, ctx.guild.id, BLACKLIST_FINE):
+            await ctx.send("❌ تعذر خصم الغرامة. لم يتم وضع العضو في البلاك ليست.", delete_after=8)
+            return
+        await self.db.add_balance(OWNER_ID, ctx.guild.id, BLACKLIST_FINE)
         await self.db.execute(
             "INSERT INTO currency_blacklist(user_id, created_at) VALUES (?, ?)",
             (member.id, time.time()),
         )
+        new_balance = await self.db.get_balance(member.id)
         await ctx.send(
             f"✅ **تم تأكيد بلاك ليست العملة**\n"
-            f"{member.mention} أصبح الآن في **Currency Blacklist**.\n"
-            f"لن يتمكن من استخدام نظام العملة."
+            f"العضو: {member.mention}\n"
+            f"الغرامة: **{BLACKLIST_FINE:,} ANORIS** → {OWNER_MENTION}\n"
+            f"الرصيد المتبقي للعضو: **{new_balance:,} ANORIS**.\n"
+            f"تم تفعيل **Currency Blacklist** عليه."
         )
 
     async def _unblacklist(self, ctx: commands.Context, member: discord.Member) -> None:
@@ -120,6 +158,25 @@ class OwnerCurrency(commands.Cog):
             f"الرصيد الجديد: **{new_balance:,} ANORIS**"
         )
 
+    async def _delegate(self, ctx: commands.Context, member: discord.Member) -> None:
+        if member.bot:
+            await ctx.send("❌ لا يمكن إعطاء صلاحيات أوامر البوت لبوت آخر.", delete_after=8)
+            return
+        if member.id == OWNER_ID:
+            await ctx.send("ℹ️ هذا العضو هو صاحب البوت أصلاً.", delete_after=8)
+            return
+        if await self._is_delegate(member.id):
+            await ctx.send(f"⚠️ {member.mention} عنده بالفعل صلاحيات أوامر صاحب البوت.", delete_after=8)
+            return
+        await self.db.execute(
+            "INSERT INTO owner_command_delegates(user_id, created_at) VALUES (?, ?)",
+            (member.id, time.time()),
+        )
+        await ctx.send(
+            f"✅ **تم منح صلاحيات أوامر البوت** لـ {member.mention}.\n"
+            f"أصبح بإمكانه استخدام جميع أوامر صاحب البوت المتاحة في النظام."
+        )
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or message.guild is None:
@@ -127,11 +184,30 @@ class OwnerCurrency(commands.Cog):
         parsed = self._parse(message.content.strip())
         if not parsed:
             return
-        if message.author.id != OWNER_ID:
-            await message.channel.send("❌ هذا الأمر مخصص لصاحب البوت فقط.", delete_after=8)
-            return
 
         command_name, args = parsed
+
+        # The delegation command itself can ONLY be executed by the actual owner.
+        if command_name == "بوت":
+            if message.author.id != OWNER_ID:
+                await message.channel.send("❌ هذا الأمر مخصص لصاحب البوت فقط.", delete_after=8)
+                return
+            ctx = await self.bot.get_context(message)
+            parts = args.split()
+            if len(parts) != 1:
+                await message.channel.send("❌ الاستعمال: `-بوت @العضو` أو `-بوت ID`", delete_after=8)
+                return
+            member = await self._resolve_member(ctx, parts[0])
+            if member is None:
+                await message.channel.send("❌ ما لقيتش هاد العضو. استعمل Mention أو ID صحيح.", delete_after=8)
+                return
+            await self._delegate(ctx, member)
+            return
+
+        if not await self._is_authorized(message.author.id):
+            await message.channel.send("❌ هذا الأمر مخصص لصاحب البوت أو لمنحه صلاحية أوامر البوت.", delete_after=8)
+            return
+
         ctx = await self.bot.get_context(message)
         parts = args.split()
         if command_name == "سحب":
