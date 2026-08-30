@@ -53,7 +53,7 @@ class OwnerCurrency(commands.Cog):
                 continue
             body = content[len(prefix):].strip()
             lowered = body.casefold()
-            for command_name in ("الغاء بلاك ليست", "بلاك ليست", "سحب", "بوت"):
+            for command_name in ("الغاء بلاك ليست", "بلاك ليست", "الغاء بوت", "سحب", "بوت"):
                 if lowered == command_name.casefold() or lowered.startswith(command_name.casefold() + " "):
                     return command_name, body[len(command_name):].strip()
         return None
@@ -92,8 +92,6 @@ class OwnerCurrency(commands.Cog):
             await ctx.send(f"⚠️ {member.mention} موجود بالفعل في بلاك ليست العملة.", delete_after=8)
             return
 
-        # The fine is NOT deducted automatically. The blacklisted member must
-        # manually pay 25,000 ANORIS to the bot owner.
         await self.db.execute(
             "INSERT INTO currency_blacklist(user_id, created_at) VALUES (?, ?)",
             (member.id, time.time()),
@@ -165,6 +163,16 @@ class OwnerCurrency(commands.Cog):
             f"أصبح بإمكانه استخدام جميع أوامر صاحب البوت المتاحة في النظام."
         )
 
+    async def _undelegate(self, ctx: commands.Context, member: discord.Member) -> None:
+        if not await self._is_delegate(member.id):
+            await ctx.send(f"⚠️ {member.mention} ما عندوش أصلاً صلاحيات أوامر صاحب البوت.", delete_after=8)
+            return
+        await self.db.execute("DELETE FROM owner_command_delegates WHERE user_id=?", (member.id,))
+        await ctx.send(
+            f"✅ **تم إلغاء صلاحيات أوامر صاحب البوت** عن {member.mention}.\n"
+            f"ما بقاش يقدر يستعمل أوامر صاحب البوت المفوضة له."
+        )
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or message.guild is None:
@@ -175,21 +183,25 @@ class OwnerCurrency(commands.Cog):
 
         command_name, args = parsed
 
-        # -بوت itself is always exclusive to the real bot owner.
-        if command_name == "بوت":
+        # Grant/revoke delegation are always exclusive to the real bot owner.
+        if command_name in ("بوت", "الغاء بوت"):
             if message.author.id != OWNER_ID:
                 await message.channel.send("❌ هذا الأمر مخصص لصاحب البوت فقط.", delete_after=8)
                 return
             ctx = await self.bot.get_context(message)
             parts = args.split()
             if len(parts) != 1:
-                await message.channel.send("❌ الاستعمال: `-بوت @العضو` أو `-بوت ID`", delete_after=8)
+                usage = "-بوت @العضو" if command_name == "بوت" else "-الغاء بوت @العضو"
+                await message.channel.send(f"❌ الاستعمال: `{usage}` أو ID", delete_after=8)
                 return
             member = await self._resolve_member(ctx, parts[0])
             if member is None:
                 await message.channel.send("❌ ما لقيتش هاد العضو. استعمل Mention أو ID صحيح.", delete_after=8)
                 return
-            await self._delegate(ctx, member)
+            if command_name == "بوت":
+                await self._delegate(ctx, member)
+            else:
+                await self._undelegate(ctx, member)
             return
 
         if not await self._is_authorized(message.author.id):
