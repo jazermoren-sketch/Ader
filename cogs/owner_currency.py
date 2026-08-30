@@ -12,6 +12,38 @@ BLACKLIST_FINE = 25_000
 OWNER_MENTION = "<@1472570059367911587>"
 
 
+class ResetConfirmView(discord.ui.View):
+    def __init__(self, cog: "OwnerCurrency", author_id: int):
+        super().__init__(timeout=30)
+        self.cog = cog
+        self.author_id = author_id
+        self.confirmed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ غير الشخص اللي استعمل الأمر يقدر يأكد العملية.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="تأكيد تصفير العملة", style=discord.ButtonStyle.danger, emoji="⚠️")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.confirmed = True
+        await self.cog._reset_all_balances(interaction)
+        for item in self.children:
+            item.disabled = True
+        await interaction.message.edit(view=self)
+        self.stop()
+
+    @discord.ui.button(label="إلغاء", style=discord.ButtonStyle.secondary, emoji="✖️")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="❌ تم إلغاء عملية تصفير جميع عملات ANORIS.", view=None)
+        self.stop()
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
 class OwnerCurrency(commands.Cog):
     """Prefix-only currency administration restricted to the bot owner or delegates."""
 
@@ -29,6 +61,12 @@ class OwnerCurrency(commands.Cog):
         )
         await self.db.execute(
             """CREATE TABLE IF NOT EXISTS owner_command_delegates (
+                user_id INTEGER PRIMARY KEY,
+                created_at REAL NOT NULL
+            )"""
+        )
+        await self.db.execute(
+            """CREATE TABLE IF NOT EXISTS reset_command_delegates (
                 user_id INTEGER PRIMARY KEY,
                 created_at REAL NOT NULL
             )"""
@@ -57,8 +95,10 @@ class OwnerCurrency(commands.Cog):
                 "الغاء بلاك ليست",
                 "بلاك ليست",
                 "الغاء بوت",
+                "الغاء رست",
                 "سحب",
                 "بوت",
+                "رست",
                 "اعطي",
             ):
                 if lowered == command_name.casefold() or lowered.startswith(command_name.casefold() + " "):
@@ -71,8 +111,17 @@ class OwnerCurrency(commands.Cog):
         )
         return row is not None
 
+    async def _is_reset_delegate(self, user_id: int) -> bool:
+        row = await self.db.fetchone(
+            "SELECT 1 FROM reset_command_delegates WHERE user_id=? LIMIT 1", (user_id,)
+        )
+        return row is not None
+
     async def _is_authorized(self, user_id: int) -> bool:
         return user_id == OWNER_ID or await self._is_delegate(user_id)
+
+    async def _is_reset_authorized(self, user_id: int) -> bool:
+        return user_id == OWNER_ID or await self._is_reset_delegate(user_id)
 
     async def _is_blacklisted(self, user_id: int) -> bool:
         row = await self.db.fetchone(
@@ -201,6 +250,46 @@ class OwnerCurrency(commands.Cog):
             f"ما بقاش يقدر يستعمل أوامر صاحب البوت المفوضة له."
         )
 
+    async def _delegate_reset(self, ctx: commands.Context, member: discord.Member) -> None:
+        if member.bot:
+            await ctx.send("❌ لا يمكن إعطاء صلاحية رست لبوت آخر.", delete_after=8)
+            return
+        if member.id == OWNER_ID:
+            await ctx.send("ℹ️ هذا العضو هو صاحب البوت أصلاً.", delete_after=8)
+            return
+        if await self._is_reset_delegate(member.id):
+            await ctx.send(f"⚠️ {member.mention} عنده بالفعل صلاحية `!رست`.", delete_after=8)
+            return
+        await self.db.execute(
+            "INSERT INTO reset_command_delegates(user_id, created_at) VALUES (?, ?)",
+            (member.id, time.time()),
+        )
+        await ctx.send(f"✅ تم منح {member.mention} صلاحية استعمال `!رست`.")
+
+    async def _undelegate_reset(self, ctx: commands.Context, member: discord.Member) -> None:
+        if not await self._is_reset_delegate(member.id):
+            await ctx.send(f"⚠️ {member.mention} ما عندوش أصلاً صلاحية `!رست`.", delete_after=8)
+            return
+        await self.db.execute("DELETE FROM reset_command_delegates WHERE user_id=?", (member.id,))
+        await ctx.send(f"✅ تم إلغاء صلاحية `!رست` عن {member.mention}.")
+
+    async def _reset_all_balances(self, interaction: discord.Interaction) -> None:
+        await self.db.execute("UPDATE global_balances SET balance=0")
+        await interaction.response.edit_message(
+            content="✅ **تم تصفير جميع عملات ANORIS بنجاح.**\nجميع الأرصدة ولات `0 ANORIS`.",
+            view=None,
+        )
+
+    async def _request_reset(self, message: discord.Message) -> None:
+        view = ResetConfirmView(self, message.author.id)
+        await message.channel.send(
+            "⚠️ **تأكيد عملية خطيرة**\n\n"
+            "هاد الأمر غادي يصفر **جميع أرصدة ANORIS لجميع الأعضاء**.\n"
+            "هاد العملية ما خاصهاش تتدار إلا كنت متأكد.\n\n"
+            "اضغط **تأكيد تصفير العملة** للمتابعة أو **إلغاء** للتراجع.",
+            view=view,
+        )
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or message.guild is None:
@@ -230,6 +319,35 @@ class OwnerCurrency(commands.Cog):
                 await self._delegate(ctx, member)
             else:
                 await self._undelegate(ctx, member)
+            return
+
+        # Only the real owner can grant/revoke the separate reset permission.
+        if command_name in ("رست", "الغاء رست") and args:
+            if message.author.id != OWNER_ID:
+                await message.channel.send("❌ إعطاء أو إلغاء صلاحية `!رست` مخصص لصاحب البوت فقط.", delete_after=8)
+                return
+            ctx = await self.bot.get_context(message)
+            parts = args.split()
+            if len(parts) != 1:
+                usage = "-رست @العضو" if command_name == "رست" else "-الغاء رست @العضو"
+                await message.channel.send(f"❌ الاستعمال: `{usage}` أو ID", delete_after=8)
+                return
+            member = await self._resolve_member(ctx, parts[0])
+            if member is None:
+                await message.channel.send("❌ ما لقيتش هاد العضو. استعمل Mention أو ID صحيح.", delete_after=8)
+                return
+            if command_name == "رست":
+                await self._delegate_reset(ctx, member)
+            else:
+                await self._undelegate_reset(ctx, member)
+            return
+
+        # !رست with no target performs the global reset after confirmation.
+        if command_name == "رست" and not args:
+            if not await self._is_reset_authorized(message.author.id):
+                await message.channel.send("❌ هذا الأمر مخصص لصاحب البوت أو لمنحه صلاحية `!رست`.", delete_after=8)
+                return
+            await self._request_reset(message)
             return
 
         if not await self._is_authorized(message.author.id):
