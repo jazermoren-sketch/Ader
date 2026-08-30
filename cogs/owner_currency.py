@@ -53,7 +53,14 @@ class OwnerCurrency(commands.Cog):
                 continue
             body = content[len(prefix):].strip()
             lowered = body.casefold()
-            for command_name in ("الغاء بلاك ليست", "بلاك ليست", "الغاء بوت", "سحب", "بوت"):
+            for command_name in (
+                "الغاء بلاك ليست",
+                "بلاك ليست",
+                "الغاء بوت",
+                "سحب",
+                "بوت",
+                "اعطي",
+            ):
                 if lowered == command_name.casefold() or lowered.startswith(command_name.casefold() + " "):
                     return command_name, body[len(command_name):].strip()
         return None
@@ -144,6 +151,27 @@ class OwnerCurrency(commands.Cog):
             f"الرصيد الجديد: **{new_balance:,} ANORIS**"
         )
 
+    async def _give(self, ctx: commands.Context, member: discord.Member, amount_text: str) -> None:
+        if member.bot:
+            await ctx.send("❌ لا يمكن إعطاء ANORIS لبوت.", delete_after=8)
+            return
+        try:
+            amount = int(amount_text.replace(",", "").replace(" ", ""))
+        except ValueError:
+            await ctx.send("❌ المبلغ يجب أن يكون رقماً صحيحاً.", delete_after=8)
+            return
+        if amount <= 0:
+            await ctx.send("❌ المبلغ يجب أن يكون أكبر من 0.", delete_after=8)
+            return
+        await self.db.add_balance(member.id, ctx.guild.id, amount)
+        new_balance = await self.db.get_balance(member.id)
+        await ctx.send(
+            f"✅ **تم إعطاء ANORIS بنجاح**\n"
+            f"العضو: {member.mention}\n"
+            f"المبلغ: **{amount:,} ANORIS**\n"
+            f"الرصيد الجديد: **{new_balance:,} ANORIS**"
+        )
+
     async def _delegate(self, ctx: commands.Context, member: discord.Member) -> None:
         if member.bot:
             await ctx.send("❌ لا يمكن إعطاء صلاحيات أوامر البوت لبوت آخر.", delete_after=8)
@@ -210,6 +238,18 @@ class OwnerCurrency(commands.Cog):
 
         ctx = await self.bot.get_context(message)
         parts = args.split()
+
+        if command_name == "اعطي":
+            if len(parts) < 2:
+                await message.channel.send("❌ الاستعمال: `!اعطي @العضو المبلغ` أو `!اعطي ID المبلغ`", delete_after=8)
+                return
+            member = await self._resolve_member(ctx, parts[0])
+            if member is None:
+                await message.channel.send("❌ ما لقيتش هاد العضو. استعمل Mention أو ID صحيح.", delete_after=8)
+                return
+            await self._give(ctx, member, "".join(parts[1:]))
+            return
+
         if command_name == "سحب":
             if len(parts) < 2:
                 await message.channel.send("❌ الاستعمال: `-سحب @العضو المبلغ` أو `-سحب ID المبلغ`", delete_after=8)
