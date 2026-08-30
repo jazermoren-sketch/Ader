@@ -92,31 +92,19 @@ class OwnerCurrency(commands.Cog):
             await ctx.send(f"⚠️ {member.mention} موجود بالفعل في بلاك ليست العملة.", delete_after=8)
             return
 
-        balance = await self.db.get_balance(member.id)
-        if balance < BLACKLIST_FINE:
-            await ctx.send(
-                f"❌ لا يمكن إضافة {member.mention} إلى بلاك ليست العملة.\n"
-                f"الغرامة هي **{BLACKLIST_FINE:,} ANORIS** وتتحول إلى صاحب البوت {OWNER_MENTION}.\n"
-                f"رصيد العضو الحالي: **{balance:,} ANORIS**.",
-                delete_after=12,
-            )
-            return
-
-        if not await self.db.remove_balance(member.id, ctx.guild.id, BLACKLIST_FINE):
-            await ctx.send("❌ تعذر خصم الغرامة. لم يتم وضع العضو في البلاك ليست.", delete_after=8)
-            return
-        await self.db.add_balance(OWNER_ID, ctx.guild.id, BLACKLIST_FINE)
+        # The fine is NOT deducted automatically. The blacklisted member must
+        # manually pay 25,000 ANORIS to the bot owner.
         await self.db.execute(
             "INSERT INTO currency_blacklist(user_id, created_at) VALUES (?, ?)",
             (member.id, time.time()),
         )
-        new_balance = await self.db.get_balance(member.id)
         await ctx.send(
             f"✅ **تم تأكيد بلاك ليست العملة**\n"
             f"العضو: {member.mention}\n"
-            f"الغرامة: **{BLACKLIST_FINE:,} ANORIS** → {OWNER_MENTION}\n"
-            f"الرصيد المتبقي للعضو: **{new_balance:,} ANORIS**.\n"
-            f"تم تفعيل **Currency Blacklist** عليه."
+            f"💰 الغرامة: **{BLACKLIST_FINE:,} ANORIS**\n"
+            f"👤 خاص العضو يخلص الغرامة لصاحب البوت {OWNER_MENTION}.\n"
+            f"⚠️ **البوت ما غاديش يخصم حتى ANORIS تلقائياً من رصيد العضو.**\n"
+            f"💳 الأداء كيديرو العضو يدوياً لصاحب البوت."
         )
 
     async def _unblacklist(self, ctx: commands.Context, member: discord.Member) -> None:
@@ -187,7 +175,7 @@ class OwnerCurrency(commands.Cog):
 
         command_name, args = parsed
 
-        # The delegation command itself can ONLY be executed by the actual owner.
+        # -بوت itself is always exclusive to the real bot owner.
         if command_name == "بوت":
             if message.author.id != OWNER_ID:
                 await message.channel.send("❌ هذا الأمر مخصص لصاحب البوت فقط.", delete_after=8)
