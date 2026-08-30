@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import sqlite3
+import time
 
 import discord
 from discord.ext import commands
@@ -19,81 +19,101 @@ class OwnerCurrency(commands.Cog):
         self.config = config
 
     async def cog_load(self) -> None:
-        # Keep this feature independent and compatible with existing databases.
-        await self.db.connection.execute(
+        await self.db.execute(
             """CREATE TABLE IF NOT EXISTS currency_blacklist (
                 user_id INTEGER PRIMARY KEY,
                 created_at REAL NOT NULL
             )"""
         )
-        await self.db.connection.commit()
+
+    def _prefixes(self) -> list[str]:
+        configured = self.config.get("bot", {}).get("prefix", "!")
+        if isinstance(configured, str):
+            prefixes = [configured]
+        elif isinstance(configured, (list, tuple)):
+            prefixes = [str(p) for p in configured]
+        else:
+            prefixes = ["!"]
+        for prefix in ("!", "$", "-"):
+            if prefix not in prefixes:
+                prefixes.append(prefix)
+        return sorted({p for p in prefixes if p}, key=len, reverse=True)
+
+    def _parse(self, content: str) -> tuple[str, str] | None:
+        for prefix in self._prefixes():
+            if not content.startswith(prefix):
+                continue
+            body = content[len(prefix):].strip()
+            lowered = body.casefold()
+            for command_name in ("الغاء بلاك ليست", "بلاك ليست", "سحب"):
+                if lowered == command_name.casefold() or lowered.startswith(command_name.casefold() + " "):
+                    return command_name, body[len(command_name):].strip()
+        return None
 
     async def _is_blacklisted(self, user_id: int) -> bool:
         row = await self.db.fetchone(
-            "SELECT 1 FROM currency_blacklist WHERE user_id = ? LIMIT 1",
-            (user_id,),
+            "SELECT 1 FROM currency_blacklist WHERE user_id=? LIMIT 1", (user_id,)
         )
         return row is not None
 
-    @commands.command(name="بلاك ليست")
-    async def currency_blacklist(self, ctx: commands.Context, member: discord.Member | None = None):
-        """Add a member to the currency blacklist."""
-        if ctx.author.id != OWNER_ID:
-            return await ctx.send("❌ هذا الأمر مخصص لصاحب البوت فقط.", delete_after=8)
-        if member is None:
-            return await ctx.send("❌ الاستعمال: `بلاك ليست @العضو` أو `بلاك ليست ID`", delete_after=8)
+    async def _resolve_member(self, ctx: commands.Context, value: str) -> discord.Member | None:
+        if not value:
+            return None
+        try:
+            return await commands.MemberConverter().convert(ctx, value)
+        except commands.BadArgument:
+            return None
+
+    async def _blacklist(self, ctx: commands.Context, member: discord.Member) -> None:
         if member.bot:
-            return await ctx.send("❌ لا يمكن وضع بوت في بلاك ليست العملة.", delete_after=8)
+            await ctx.send("❌ لا يمكن وضع بوت في بلاك ليست العملة.", delete_after=8)
+            return
         if await self._is_blacklisted(member.id):
-            return await ctx.send(f"⚠️ {member.mention} موجود بالفعل في بلاك ليست العملة.", delete_after=8)
-
-        await self.db.connection.execute(
-            "INSERT INTO currency_blacklist(user_id, created_at) VALUES (?, strftime('%s','now'))",
-            (member.id,),
+            await ctx.send(f"⚠️ {member.mention} موجود بالفعل في بلاك ليست العملة.", delete_after=8)
+            return
+        await self.db.execute(
+            "INSERT INTO currency_blacklist(user_id, created_at) VALUES (?, ?)",
+            (member.id, time.time()),
         )
-        await self.db.connection.commit()
         await ctx.send(
-            f"✅ **تم تأكيد بلاك ليست العملة**\n{member.mention} أصبح الآن في **Currency Blacklist**.\n"
-            "لن يتمكن من استخدام وظائف العملة المحمية."
+            f"✅ **تم تأكيد بلاك ليست العملة**\n"
+            f"{member.mention} أصبح الآن في **Currency Blacklist**.\n"
+            f"لن يتمكن من استخدام وظائف العملة المحمية."
         )
 
-    @commands.command(name="الغاء بلاك ليست")
-    async def currency_unblacklist(self, ctx: commands.Context, member: discord.Member | None = None):
-        """Remove a member from the currency blacklist."""
-        if ctx.author.id != OWNER_ID:
-            return await ctx.send("❌ هذا الأمر مخصص لصاحب البوت فقط.", delete_after=8)
-        if member is None:
-            return await ctx.send("❌ الاستعمال: `الغاء بلاك ليست @العضو` أو `الغاء بلاك ليست ID`", delete_after=8)
+    async def _unblacklist(self, ctx: commands.Context, member: discord.Member) -> None:
         if not await self._is_blacklisted(member.id):
-            return await ctx.send(f"⚠️ {member.mention} ماشي موجود في بلاك ليست العملة.", delete_after=8)
-
-        await self.db.connection.execute("DELETE FROM currency_blacklist WHERE user_id = ?", (member.id,))
-        await self.db.connection.commit()
+            await ctx.send(f"⚠️ {member.mention} ماشي موجود في بلاك ليست العملة.", delete_after=8)
+            return
+        await self.db.execute("DELETE FROM currency_blacklist WHERE user_id=?", (member.id,))
         await ctx.send(f"✅ تم **إلغاء بلاك ليست العملة** عن {member.mention}.")
 
-    @commands.command(name="سحب")
-    async def currency_withdraw(self, ctx: commands.Context, member: discord.Member | None = None, amount: int | None = None):
-        """Withdraw ANOCoin from another member's global balance."""
-        if ctx.author.id != OWNER_ID:
-            return await ctx.send("❌ هذا الأمر مخصص لصاحب البوت فقط.", delete_after=8)
-        if member is None or amount is None:
-            return await ctx.send("❌ الاستعمال: `سحب @العضو المبلغ` أو `سحب ID المبلغ`", delete_after=8)
+    async def _withdraw(self, ctx: commands.Context, member: discord.Member, amount_text: str) -> None:
         if member.bot:
-            return await ctx.send("❌ لا يمكن سحب العملة من بوت.", delete_after=8)
+            await ctx.send("❌ لا يمكن سحب العملة من بوت.", delete_after=8)
+            return
+        try:
+            amount = int(amount_text.replace(",", "").replace(" ", ""))
+        except ValueError:
+            await ctx.send("❌ المبلغ يجب أن يكون رقماً صحيحاً.", delete_after=8)
+            return
         if amount <= 0:
-            return await ctx.send("❌ المبلغ يجب أن يكون أكبر من 0.", delete_after=8)
+            await ctx.send("❌ المبلغ يجب أن يكون أكبر من 0.", delete_after=8)
+            return
 
         balance = await self.db.get_balance(member.id)
         if balance < amount:
-            return await ctx.send(
+            await ctx.send(
                 f"❌ رصيد {member.mention} غير كافٍ.\n"
-                f"الرصيد الحالي: **{balance:,} ANORIS**\nالمبلغ المطلوب: **{amount:,} ANORIS**",
+                f"الرصيد الحالي: **{balance:,} ANORIS**\n"
+                f"المبلغ المطلوب: **{amount:,} ANORIS**",
                 delete_after=10,
             )
+            return
 
-        removed = await self.db.remove_balance(member.id, ctx.guild.id if ctx.guild else 0, amount)
-        if not removed:
-            return await ctx.send("❌ تعذر سحب المبلغ. لم يتم تغيير الرصيد.", delete_after=8)
+        if not await self.db.remove_balance(member.id, ctx.guild.id, amount):
+            await ctx.send("❌ تعذر سحب المبلغ. لم يتم تغيير الرصيد.", delete_after=8)
+            return
 
         new_balance = await self.db.get_balance(member.id)
         await ctx.send(
@@ -103,27 +123,45 @@ class OwnerCurrency(commands.Cog):
             f"الرصيد الجديد: **{new_balance:,} ANORIS**"
         )
 
-    async def cog_check(self, ctx: commands.Context) -> bool:
-        # Prefix commands in this cog are owner-only. Keep a defensive check
-        # even if a command is invoked through an alias or future addition.
-        if ctx.author.id != OWNER_ID:
-            raise commands.CheckFailure("Owner only")
-        return True
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or message.guild is None:
+            return
+        parsed = self._parse(message.content.strip())
+        if not parsed:
+            return
 
-    async def cog_command_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
-        if isinstance(error, commands.MemberNotFound):
-            await ctx.send("❌ ما لقيتش هاد العضو. استعمل Mention أو ID صحيح.", delete_after=8)
+        if message.author.id != OWNER_ID:
+            await message.channel.send("❌ هذا الأمر مخصص لصاحب البوت فقط.", delete_after=8)
             return
-        if isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("❌ الاستعمال غير صحيح. استعمل Mention أو ID، والمبلغ في أمر السحب.", delete_after=8)
+
+        command_name, args = parsed
+        ctx = await self.bot.get_context(message)
+        parts = args.split()
+
+        if command_name == "سحب":
+            if len(parts) < 2:
+                await message.channel.send("❌ الاستعمال: `-سحب @العضو المبلغ` أو `-سحب ID المبلغ`", delete_after=8)
+                return
+            member = await self._resolve_member(ctx, parts[0])
+            if member is None:
+                await message.channel.send("❌ ما لقيتش هاد العضو. استعمل Mention أو ID صحيح.", delete_after=8)
+                return
+            await self._withdraw(ctx, member, "".join(parts[1:]))
             return
-        if isinstance(error, commands.BadArgument):
-            await ctx.send("❌ العضو غير صالح. استعمل Mention أو ID صحيح.", delete_after=8)
+
+        if len(parts) != 1:
+            usage = "-بلاك ليست @العضو" if command_name == "بلاك ليست" else "-الغاء بلاك ليست @العضو"
+            await message.channel.send(f"❌ الاستعمال: `{usage}` أو ID", delete_after=8)
             return
-        if isinstance(error, commands.CheckFailure):
-            await ctx.send("❌ هذا الأمر مخصص لصاحب البوت فقط.", delete_after=8)
+        member = await self._resolve_member(ctx, parts[0])
+        if member is None:
+            await message.channel.send("❌ ما لقيتش هاد العضو. استعمل Mention أو ID صحيح.", delete_after=8)
             return
-        raise error
+        if command_name == "بلاك ليست":
+            await self._blacklist(ctx, member)
+        else:
+            await self._unblacklist(ctx, member)
 
 
 async def setup(bot: commands.Bot):
