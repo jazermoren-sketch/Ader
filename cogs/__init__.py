@@ -1,4 +1,7 @@
 """Cogs package for Logiq"""
 
-# Load the lightweight -بوت target-message patch before any cog is imported.
+# Install owner delegation before any cog uses commands.is_owner()/Bot.is_owner().
+from . import owner_delegate_permissions  # noqa: F401,E402
+
+# Keep the legacy module import for compatibility; it no longer intercepts -بوت.
 from . import bot_status_patch  # noqa: F401,E402
