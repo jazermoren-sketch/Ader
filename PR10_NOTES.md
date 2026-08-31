@@ -1,1 +1,0 @@
-PR 10 implementation notes: delegated `-بوت` users are recognized by global owner checks, and `-بوت` / `-الغاء بوت` are routed directly without the legacy bot-status response. `!رست` remains a separate permission.
