@@ -238,8 +238,8 @@ class Ader(commands.Bot):
                 self.logger.warning(f"Target guild {self.TARGET_GUILD_ID} is not visible to the bot")
             self._ready_sync_done = True
             self.logger.info(f"Ader ready as {self.user} in {len(self.guilds)} guilds")
-        except Exception as exc:
-            self.logger.error(f"Command sync failed: {exc}", exc_info=True)
+        except Exception:
+            self.logger.error("Command synchronization failed", exc_info=True)
 
     async def close(self):
         try:
@@ -247,3 +247,35 @@ class Ader(commands.Bot):
         finally:
             self._release_instance_lock()
             await super().close()
+
+
+def _get_discord_token(config):
+    token = os.getenv("DISCORD_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
+    if not token:
+        configured = str(config.get("bot", {}).get("token", "") or "").strip()
+        token = os.getenv(configured[2:-1].strip(), "") if configured.startswith("${") and configured.endswith("}") else configured
+    token = (token or "").strip()
+    if token.lower().startswith("bot "):
+        token = token[4:].strip()
+    if not token or token.startswith("${"):
+        raise RuntimeError("Discord bot token is not configured. Set DISCORD_BOT_TOKEN in the hosting panel.")
+    return token
+
+
+def load_config():
+    with open("config.yaml", "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+async def main():
+    config = load_config()
+    bot = Ader(config)
+    token = _get_discord_token(config)
+    try:
+        await bot.start(token)
+    finally:
+        await bot.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
