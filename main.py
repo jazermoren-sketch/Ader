@@ -2,6 +2,7 @@
 import asyncio
 import math
 import os
+import time
 from pathlib import Path
 from datetime import timedelta
 
@@ -48,6 +49,7 @@ class Ader(commands.Bot):
         self.db = DatabaseManager(str(db_path))
         self._instance_lock_handle = None
         self._ready_sync_done = False
+        self._processed_message_count = 0
         self.tree.on_error = self._tree_error
 
     def _acquire_instance_lock(self):
@@ -80,7 +82,51 @@ class Ader(commands.Bot):
     async def setup_hook(self):
         self._acquire_instance_lock()
         await self.db.connect()
+        await self.db.execute(
+            """CREATE TABLE IF NOT EXISTS processed_messages(
+                message_id INTEGER PRIMARY KEY,
+                created_at REAL NOT NULL
+            )"""
+        )
+        await self.db.execute(
+            "DELETE FROM processed_messages WHERE created_at < ?",
+            (time.time() - 7 * 24 * 60 * 60,),
+        )
         await self.load_cogs()
+
+    async def _claim_message_once(self, message_id: int) -> bool:
+        """Atomically claim a Discord message before any prefix handler runs.
+
+        Discord can deliver the same user message to more than one running
+        bot process when an old/restarted instance overlaps with the current
+        instance.  The SQLite primary key makes the claim global for all Ader
+        processes sharing the configured database, so only one process can
+        produce a response or execute a prefix command for that message.
+        """
+        try:
+            cursor = await self.db.execute(
+                "INSERT OR IGNORE INTO processed_messages(message_id, created_at) VALUES(?, ?)",
+                (int(message_id), time.time()),
+            )
+            claimed = cursor.rowcount == 1
+            try:
+                await cursor.close()
+            except Exception:
+                pass
+
+            if claimed:
+                self._processed_message_count += 1
+                if self._processed_message_count % 1000 == 0:
+                    await self.db.execute(
+                        "DELETE FROM processed_messages WHERE created_at < ?",
+                        (time.time() - 7 * 24 * 60 * 60,),
+                    )
+            return claimed
+        except Exception as exc:
+            # A dedupe failure must not silently disable the whole bot.  Log it
+            # and process the message normally; command-level safeguards remain.
+            self.logger.error(f"Message dedupe check failed for {message_id}: {exc}")
+            return True
 
     async def load_cogs(self):
         extensions = (
@@ -199,6 +245,8 @@ class Ader(commands.Bot):
 
     async def on_message(self, message: discord.Message):
         if message.author.bot:
+            return
+        if not await self._claim_message_once(message.id):
             return
         if await self._handle_a_message(message):
             return
