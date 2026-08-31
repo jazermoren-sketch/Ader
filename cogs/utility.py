@@ -92,13 +92,141 @@ class Utility(commands.Cog):
         self.db = db
         self.config = config
         self.reminders_task = None
+        self.team_role_sync_task = None
 
     async def cog_load(self):
         self.reminders_task = asyncio.create_task(self.check_reminders())
+        self.team_role_sync_task = asyncio.create_task(self.sync_team_roles_when_ready())
 
     def cog_unload(self):
         """Cleanup on cog unload"""
-        self.reminders_task.cancel()
+        if self.reminders_task:
+            self.reminders_task.cancel()
+        if self.team_role_sync_task:
+            self.team_role_sync_task.cancel()
+
+    async def sync_team_roles_when_ready(self):
+        """Make verified team membership follow Discord team roles."""
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(1)
+        try:
+            await self.db.execute(
+                "CREATE TABLE IF NOT EXISTS team_members(" 
+                "team_id INTEGER NOT NULL,guild_id INTEGER NOT NULL,user_id INTEGER NOT NULL,joined_at REAL NOT NULL,"
+                "PRIMARY KEY(team_id,user_id),UNIQUE(guild_id,user_id))"
+            )
+            teams = await self.db.fetchall(
+                "SELECT id,guild_id,role_id FROM verified_teams WHERE active=1"
+            )
+            by_guild = {}
+            for row in teams:
+                by_guild.setdefault(int(row["guild_id"]), []).append(row)
+
+            for guild_id, team_rows in by_guild.items():
+                guild = self.bot.get_guild(guild_id)
+                if guild is None:
+                    continue
+                for member in guild.members:
+                    await self.sync_member_team_role(member, team_rows)
+        except Exception:
+            logger.error("Failed to synchronize team memberships from roles", exc_info=True)
+
+    async def sync_member_team_role(self, member: discord.Member, team_rows=None):
+        """Synchronize one member's team membership from their verified role."""
+        if member.guild is None or member.bot:
+            return
+        if team_rows is None:
+            team_rows = await self.db.fetchall(
+                "SELECT id,guild_id,role_id FROM verified_teams WHERE guild_id=? AND active=1",
+                (member.guild.id,),
+            )
+
+        role_ids = {role.id for role in member.roles}
+        matches = [row for row in team_rows if int(row["role_id"]) in role_ids]
+
+        # The existing team_members schema allows one team per guild/member.
+        # If multiple verified team roles exist, use the highest Discord role.
+        selected = None
+        if matches:
+            role_position = {role.id: role.position for role in member.roles}
+            selected = max(matches, key=lambda row: role_position.get(int(row["role_id"]), -1))
+
+        try:
+            if selected is None:
+                await self.db.execute(
+                    "DELETE FROM team_members WHERE guild_id=? AND user_id=?",
+                    (member.guild.id, member.id),
+                )
+                return
+
+            team_id = int(selected["id"])
+            await self.db.execute(
+                "DELETE FROM team_members WHERE guild_id=? AND user_id=? AND team_id<>?",
+                (member.guild.id, member.id, team_id),
+            )
+            await self.db.execute(
+                "INSERT OR IGNORE INTO team_members(team_id,guild_id,user_id,joined_at) VALUES(?,?,?,?)",
+                (team_id, member.guild.id, member.id, datetime.utcnow().timestamp()),
+            )
+        except Exception:
+            logger.error(
+                "Failed to synchronize team role for member %s in guild %s",
+                member.id, member.guild.id, exc_info=True
+            )
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        if before.roles == after.roles:
+            return
+        await self.sync_member_team_role(after)
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        await self.sync_member_team_role(member)
+
+    @commands.Cog.listener()
+    async def on_guild_role_delete(self, role: discord.Role):
+        try:
+            team = await self.db.fetchone(
+                "SELECT id FROM verified_teams WHERE guild_id=? AND role_id=?",
+                (role.guild.id, role.id),
+            )
+            if team:
+                await self.db.execute(
+                    "UPDATE verified_teams SET active=0 WHERE id=?",
+                    (team["id"],),
+                )
+                await self.db.execute(
+                    "DELETE FROM team_members WHERE team_id=?",
+                    (team["id"],),
+                )
+        except Exception:
+            logger.error("Failed to clean deleted team role", exc_info=True)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """Handle the requested `-بوت` shortcut."""
+        if message.author.bot or message.guild is None:
+            return
+        if message.content.strip() != "-بوت":
+            return
+
+        bot_user = self.bot.user
+        latency = round(self.bot.latency * 1000)
+        embed = discord.Embed(
+            title="🤖 Ader",
+            description="البوت خدام بشكل طبيعي ✅",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="📡 Ping", value=f"`{latency}ms`", inline=True)
+        embed.add_field(name="🏠 السيرفرات", value=f"`{len(self.bot.guilds)}`", inline=True)
+        if bot_user:
+            embed.set_thumbnail(url=bot_user.display_avatar.url)
+        await message.reply(
+            embed=embed,
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     async def check_reminders(self):
         """Background task to check for due reminders"""
@@ -155,7 +283,7 @@ class Utility(commands.Cog):
         if option4:
             options.append(option4)
 
-        if duration < 1 or duration > 10080:  # Max 1 week
+        if duration < 1 or duration > 10080:
             await interaction.response.send_message(
                 embed=EmbedFactory.error("Invalid Duration", "Duration must be between 1 minute and 1 week"),
                 ephemeral=True
@@ -163,8 +291,6 @@ class Utility(commands.Cog):
             return
 
         view = PollView(question, options, duration * 60)
-
-        # Only show buttons for available options
         for i in range(4):
             if i >= len(options):
                 view.children[i].disabled = True
@@ -191,7 +317,7 @@ class Utility(commands.Cog):
             )
             return
 
-        if seconds > 31536000:  # Max 1 year
+        if seconds > 31536000:
             await interaction.response.send_message(
                 embed=EmbedFactory.error("Duration Too Long", "Maximum reminder duration is 1 year"),
                 ephemeral=True
@@ -199,7 +325,6 @@ class Utility(commands.Cog):
             return
 
         remind_at = datetime.utcnow().timestamp() + seconds
-
         reminder_data = {
             "user_id": interaction.user.id,
             "guild_id": interaction.guild.id,
@@ -224,8 +349,6 @@ class Utility(commands.Cog):
     async def serverstats(self, interaction: discord.Interaction):
         """View server stats"""
         guild = interaction.guild
-
-        # Count various stats
         total_members = guild.member_count
         bots = sum(1 for member in guild.members if member.bot)
         humans = total_members - bots
@@ -249,7 +372,6 @@ class Utility(commands.Cog):
                 {"name": "🚀 Boost Level", "value": f"Level {guild.premium_tier}", "inline": True}
             ]
         )
-
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="userinfo", description="Get information about a user (Admin)")
@@ -258,8 +380,7 @@ class Utility(commands.Cog):
     async def userinfo(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
         """Get user information"""
         target = user or interaction.user
-
-        roles = [role.mention for role in target.roles[1:]]  # Exclude @everyone
+        roles = [role.mention for role in target.roles[1:]]
         roles_str = ", ".join(roles[:10]) if roles else "None"
         if len(roles) > 10:
             roles_str += f" (+{len(roles) - 10} more)"
@@ -278,7 +399,6 @@ class Utility(commands.Cog):
                 {"name": f"Roles ({len(roles)})", "value": roles_str, "inline": False}
             ]
         )
-
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="avatar", description="Get user's avatar (Admin)")
@@ -287,13 +407,11 @@ class Utility(commands.Cog):
     async def avatar(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
         """Get user avatar"""
         target = user or interaction.user
-
         embed = EmbedFactory.create(
             title=f"Avatar - {target.display_name}",
             color=EmbedColor.INFO,
             image=target.display_avatar.url
         )
-
         await interaction.response.send_message(embed=embed)
 
 
