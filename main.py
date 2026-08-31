@@ -23,6 +23,45 @@ except ImportError:
     fcntl = None
 
 
+class AderContext(commands.Context):
+    """Prefix-command context that replies to the triggering message.
+
+    Every normal ``ctx.send(...)`` made by a prefix command is converted into
+    a Discord reply without pinging the original author.  Commands therefore
+    do not need to be edited one-by-one.
+    """
+
+    async def send(self, content=None, *, tts=False, embed=None, embeds=None,
+                   file=None, files=None, stickers=None, delete_after=None,
+                   nonce=None, allowed_mentions=None, reference=None,
+                   mention_author=False, view=None, suppress_embeds=False,
+                   silent=False, applied_tags=None, poll=None, **kwargs):
+        if reference is None and self.message is not None:
+            reference = self.message.to_reference(fail_if_not_exists=False)
+        if allowed_mentions is None:
+            allowed_mentions = discord.AllowedMentions.none()
+        return await super().send(
+            content=content,
+            tts=tts,
+            embed=embed,
+            embeds=embeds,
+            file=file,
+            files=files,
+            stickers=stickers,
+            delete_after=delete_after,
+            nonce=nonce,
+            allowed_mentions=allowed_mentions,
+            reference=reference,
+            mention_author=False,
+            view=view,
+            suppress_embeds=suppress_embeds,
+            silent=silent,
+            applied_tags=applied_tags,
+            poll=poll,
+            **kwargs,
+        )
+
+
 class Ader(commands.Bot):
     TARGET_GUILD_ID = 1490355290116194388
 
@@ -51,6 +90,10 @@ class Ader(commands.Bot):
         self._ready_sync_done = False
         self._processed_message_count = 0
         self.tree.on_error = self._tree_error
+
+    async def get_context(self, origin, *, cls=None):
+        """Use AderContext for every prefix message processed by the bot."""
+        return await super().get_context(origin, cls=cls or AderContext)
 
     def _acquire_instance_lock(self):
         if fcntl is None:
@@ -95,14 +138,7 @@ class Ader(commands.Bot):
         await self.load_cogs()
 
     async def _claim_message_once(self, message_id: int) -> bool:
-        """Atomically claim a Discord message before any prefix handler runs.
-
-        Discord can deliver the same user message to more than one running
-        bot process when an old/restarted instance overlaps with the current
-        instance.  The SQLite primary key makes the claim global for all Ader
-        processes sharing the configured database, so only one process can
-        produce a response or execute a prefix command for that message.
-        """
+        """Atomically claim a Discord message before any prefix handler runs."""
         try:
             cursor = await self.db.execute(
                 "INSERT OR IGNORE INTO processed_messages(message_id, created_at) VALUES(?, ?)",
@@ -123,8 +159,6 @@ class Ader(commands.Bot):
                     )
             return claimed
         except Exception as exc:
-            # A dedupe failure must not silently disable the whole bot.  Log it
-            # and process the message normally; command-level safeguards remain.
             self.logger.error(f"Message dedupe check failed for {message_id}: {exc}")
             return True
 
@@ -193,26 +227,26 @@ class Ader(commands.Bot):
         if not parts or parts[0].lower() != "a":
             return False
         if len(parts) > 3:
-            await message.channel.send("❌ الاستعمال: `A` أو `A @العضو` أو `A @العضو المبلغ`", delete_after=8)
+            await message.channel.send("❌ الاستعمال: `A` أو `A @العضو` أو `A @العضو المبلغ`", delete_after=8, reference=message.to_reference(fail_if_not_exists=False), allowed_mentions=discord.AllowedMentions.none())
             return True
         economy = self.get_cog("Economy")
         if economy is None:
-            await message.channel.send("❌ نظام الاقتصاد غير متوفر حالياً.", delete_after=8)
+            await message.channel.send("❌ نظام الاقتصاد غير متوفر حالياً.", delete_after=8, reference=message.to_reference(fail_if_not_exists=False), allowed_mentions=discord.AllowedMentions.none())
             return True
         owner_currency = self.get_cog("OwnerCurrency")
         if owner_currency is not None and await owner_currency._is_blacklisted(message.author.id):
-            await message.channel.send("❌ أنت في بلاك ليست العملة، ولا يمكنك استعمال نظام العملة.", delete_after=8)
+            await message.channel.send("❌ أنت في بلاك ليست العملة، ولا يمكنك استعمال نظام العملة.", delete_after=8, reference=message.to_reference(fail_if_not_exists=False), allowed_mentions=discord.AllowedMentions.none())
             return True
         mentions = list(message.mentions)
         if len(mentions) > 1:
-            await message.channel.send("❌ يرجى تحديد عضو واحد فقط.", delete_after=8)
+            await message.channel.send("❌ يرجى تحديد عضو واحد فقط.", reference=message.to_reference(fail_if_not_exists=False), allowed_mentions=discord.AllowedMentions.none())
             return True
         if len(mentions) == 0:
             if len(parts) == 1:
                 balance = await self.db.get_balance(message.author.id)
-                await message.channel.send(embed=discord.Embed(title="🪙 رصيدك", description=f"رصيدك الحالي: **{balance:,} ANORIS**", colour=discord.Colour.gold()))
+                await message.channel.send(embed=discord.Embed(title="🪙 رصيدك", description=f"رصيدك الحالي: **{balance:,} ANORIS**", colour=discord.Colour.gold()), reference=message.to_reference(fail_if_not_exists=False), allowed_mentions=discord.AllowedMentions.none())
             else:
-                await message.channel.send("❌ الاستعمال: `A` أو `A @العضو` أو `A @العضو المبلغ`", delete_after=8)
+                await message.channel.send("❌ الاستعمال: `A` أو `A @العضو` أو `A @العضو المبلغ`", delete_after=8, reference=message.to_reference(fail_if_not_exists=False), allowed_mentions=discord.AllowedMentions.none())
             return True
 
         member = mentions[0]
@@ -221,26 +255,26 @@ class Ader(commands.Bot):
             try:
                 amount = int(parts[-1].replace(",", ""))
             except ValueError:
-                await message.channel.send("❌ المبلغ يجب أن يكون رقماً صحيحاً.", delete_after=8)
+                await message.channel.send("❌ المبلغ يجب أن يكون رقماً صحيحاً.", delete_after=8, reference=message.to_reference(fail_if_not_exists=False), allowed_mentions=discord.AllowedMentions.none())
                 return True
         if amount is None:
             balance = await self.db.get_balance(member.id)
-            await message.channel.send(embed=discord.Embed(title=f"🪙 رصيد {member.display_name}", description=f"رصيد {member.mention}: **{balance:,} ANORIS**", colour=discord.Colour.gold()))
+            await message.channel.send(embed=discord.Embed(title=f"🪙 رصيد {member.display_name}", description=f"رصيد {member.mention}: **{balance:,} ANORIS**", colour=discord.Colour.gold()), reference=message.to_reference(fail_if_not_exists=False), allowed_mentions=discord.AllowedMentions.none())
             return True
         if amount <= 0 or member.bot or member.id == message.author.id:
-            await message.channel.send("❌ يجب تحديد مبلغ موجب وعضو آخر غير البوتات.", delete_after=8)
+            await message.channel.send("❌ يجب تحديد مبلغ موجب وعضو آخر غير البوتات.", delete_after=8, reference=message.to_reference(fail_if_not_exists=False), allowed_mentions=discord.AllowedMentions.none())
             return True
         balance = await self.db.get_balance(message.author.id)
         fee = max(1, math.ceil(amount * 0.05))
         total = amount + fee
         if balance < total:
-            await message.channel.send(f"❌ رصيدك غير كافٍ. تحتاج **{total:,} ANORIS** ورصيدك الحالي **{balance:,} ANORIS**.", delete_after=10)
+            await message.channel.send(f"❌ رصيدك غير كافٍ. تحتاج **{total:,} ANORIS** ورصيدك الحالي **{balance:,} ANORIS**.", delete_after=10, reference=message.to_reference(fail_if_not_exists=False), allowed_mentions=discord.AllowedMentions.none())
             return True
         confirmed = await economy._confirm(message.channel, message.author, message.guild.id, "التحويل")
         if not confirmed:
             return True
         ok, text = await economy._transfer_amount(message.guild, message.author, member, amount)
-        await message.channel.send(text if ok else text, delete_after=None if ok else 10)
+        await message.channel.send(text if ok else text, delete_after=None if ok else 10, reference=message.to_reference(fail_if_not_exists=False), allowed_mentions=discord.AllowedMentions.none())
         return True
 
     async def on_message(self, message: discord.Message):
