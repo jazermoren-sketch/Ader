@@ -85,7 +85,7 @@ class OwnerCurrency(commands.Cog):
                 prefixes.append(prefix)
         return sorted({p for p in prefixes if p}, key=len, reverse=True)
 
-    def _parse(self, content: str) -> tuple[str, str] | None:
+    def _parse(self, content: str) -> tuple[str, str, str] | None:
         for prefix in self._prefixes():
             if not content.startswith(prefix):
                 continue
@@ -96,11 +96,13 @@ class OwnerCurrency(commands.Cog):
                 "بلاك ليست",
                 "الغاء بوت",
                 "الغاء رست",
+                "سحب",
+                "اعطي",
                 "بوت",
                 "رست",
             ):
                 if lowered == command_name.casefold() or lowered.startswith(command_name.casefold() + " "):
-                    return command_name, body[len(command_name):].strip()
+                    return command_name, body[len(command_name):].strip(), prefix
         return None
 
     async def _is_delegate(self, user_id: int) -> bool:
@@ -116,9 +118,11 @@ class OwnerCurrency(commands.Cog):
         return row is not None
 
     async def _is_authorized(self, user_id: int) -> bool:
+        """Owner/delegate authorization for owner commands, excluding reset."""
         return user_id == OWNER_ID or await self._is_delegate(user_id)
 
     async def _is_reset_authorized(self, user_id: int) -> bool:
+        """Separate authorization for the dangerous global reset command."""
         return user_id == OWNER_ID or await self._is_reset_delegate(user_id)
 
     async def _is_blacklisted(self, user_id: int) -> bool:
@@ -167,6 +171,9 @@ class OwnerCurrency(commands.Cog):
         await ctx.send(f"✅ تم **إلغاء بلاك ليست العملة** عن {member.mention}.")
 
     async def _withdraw(self, ctx: commands.Context, member: discord.Member, amount_text: str) -> None:
+        if ctx.guild is None:
+            await ctx.send("❌ هاد الأمر خدام غير داخل السيرفر.", delete_after=8)
+            return
         if member.bot:
             await ctx.send("❌ لا يمكن سحب العملة من بوت.", delete_after=8)
             return
@@ -199,6 +206,9 @@ class OwnerCurrency(commands.Cog):
         )
 
     async def _give(self, ctx: commands.Context, member: discord.Member, amount_text: str) -> None:
+        if ctx.guild is None:
+            await ctx.send("❌ هاد الأمر خدام غير داخل السيرفر.", delete_after=8)
+            return
         if member.bot:
             await ctx.send("❌ لا يمكن إعطاء ANORIS لبوت.", delete_after=8)
             return
@@ -251,7 +261,7 @@ class OwnerCurrency(commands.Cog):
         )
         await ctx.send(
             f"✅ **تم منح صلاحيات أوامر البوت** لـ {member.mention}.\n"
-            f"أصبح بإمكانه استخدام جميع أوامر صاحب البوت المتاحة في النظام."
+            f"أصبح بإمكانه استخدام جميع أوامر صاحب البوت المتاحة في النظام، **باستثناء `!رست`**."
         )
 
     async def _undelegate(self, ctx: commands.Context, member: discord.Member) -> None:
@@ -312,7 +322,7 @@ class OwnerCurrency(commands.Cog):
         if not parsed:
             return
 
-        command_name, args = parsed
+        command_name, args, prefix = parsed
 
         # Grant/revoke delegation are always exclusive to the real bot owner.
         if command_name in ("بوت", "الغاء بوت"):
@@ -364,11 +374,32 @@ class OwnerCurrency(commands.Cog):
             await self._request_reset(message)
             return
 
-        # !اعطي and !سحب are implemented as real prefix commands above so
-        # they run through discord.py's normal command dispatch and work for
-        # both the real owner and delegated bot owners.
+        # -سحب / -اعطي are supported here because main.py does not register
+        # the '-' prefix in discord.py's normal command dispatcher. Registered
+        # prefixes such as !/$ continue through the normal command pipeline.
+        if prefix == "-" and command_name in ("سحب", "اعطي"):
+            if not await self._is_authorized(message.author.id):
+                await message.channel.send("❌ هذا الأمر مخصص لصاحب البوت أو لمنحه صلاحية أوامر البوت.", delete_after=8)
+                return
+            ctx = await self.bot.get_context(message)
+            parts = args.split()
+            if len(parts) != 2:
+                usage = "-سحب @العضو المبلغ" if command_name == "سحب" else "-اعطي @العضو المبلغ"
+                await message.channel.send(f"❌ الاستعمال: `{usage}` أو ID", delete_after=8)
+                return
+            member = await self._resolve_member(ctx, parts[0])
+            if member is None:
+                await message.channel.send("❌ ما لقيتش هاد العضو. استعمل Mention أو ID صحيح.", delete_after=8)
+                return
+            if command_name == "سحب":
+                await self._withdraw(ctx, member, parts[1])
+            else:
+                await self._give(ctx, member, parts[1])
+            return
 
         # Blacklist commands continue to use the custom listener parser.
+        if command_name not in ("بلاك ليست", "الغاء بلاك ليست"):
+            return
         if not await self._is_authorized(message.author.id):
             await message.channel.send("❌ هذا الأمر مخصص لصاحب البوت أو لمنحه صلاحية أوامر البوت.", delete_after=8)
             return
