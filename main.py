@@ -35,7 +35,7 @@ class AderContext(commands.Context):
                    file=None, files=None, stickers=None, delete_after=None,
                    nonce=None, allowed_mentions=None, reference=None,
                    mention_author=False, view=None, suppress_embeds=False,
-                   silent=False, applied_tags=None, poll=None, **kwargs):
+                   silent=False, **kwargs):
         if reference is None and self.message is not None:
             reference = self.message.to_reference(fail_if_not_exists=False)
         if allowed_mentions is None:
@@ -56,8 +56,6 @@ class AderContext(commands.Context):
             view=view,
             suppress_embeds=suppress_embeds,
             silent=silent,
-            applied_tags=applied_tags,
-            poll=poll,
             **kwargs,
         )
 
