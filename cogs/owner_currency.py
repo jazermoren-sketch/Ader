@@ -96,10 +96,8 @@ class OwnerCurrency(commands.Cog):
                 "بلاك ليست",
                 "الغاء بوت",
                 "الغاء رست",
-                "سحب",
                 "بوت",
                 "رست",
-                "اعطي",
             ):
                 if lowered == command_name.casefold() or lowered.startswith(command_name.casefold() + " "):
                     return command_name, body[len(command_name):].strip()
@@ -220,6 +218,22 @@ class OwnerCurrency(commands.Cog):
             f"المبلغ: **{amount:,} ANORIS**\n"
             f"الرصيد الجديد: **{new_balance:,} ANORIS**"
         )
+
+    @commands.command(name="اعطي")
+    async def give_command(self, ctx: commands.Context, member: discord.Member, amount: str):
+        """Give ANORIS using the normal prefix command pipeline."""
+        if not await self._is_authorized(ctx.author.id):
+            await ctx.send("❌ هذا الأمر مخصص لصاحب البوت أو لمنحه صلاحية أوامر البوت.", delete_after=8)
+            return
+        await self._give(ctx, member, amount)
+
+    @commands.command(name="سحب")
+    async def withdraw_command(self, ctx: commands.Context, member: discord.Member, amount: str):
+        """Withdraw ANORIS using the normal prefix command pipeline."""
+        if not await self._is_authorized(ctx.author.id):
+            await ctx.send("❌ هذا الأمر مخصص لصاحب البوت أو لمنحه صلاحية أوامر البوت.", delete_after=8)
+            return
+        await self._withdraw(ctx, member, amount)
 
     async def _delegate(self, ctx: commands.Context, member: discord.Member) -> None:
         if member.bot:
@@ -350,34 +364,17 @@ class OwnerCurrency(commands.Cog):
             await self._request_reset(message)
             return
 
+        # !اعطي and !سحب are implemented as real prefix commands above so
+        # they run through discord.py's normal command dispatch and work for
+        # both the real owner and delegated bot owners.
+
+        # Blacklist commands continue to use the custom listener parser.
         if not await self._is_authorized(message.author.id):
             await message.channel.send("❌ هذا الأمر مخصص لصاحب البوت أو لمنحه صلاحية أوامر البوت.", delete_after=8)
             return
 
         ctx = await self.bot.get_context(message)
         parts = args.split()
-
-        if command_name == "اعطي":
-            if len(parts) < 2:
-                await message.channel.send("❌ الاستعمال: `!اعطي @العضو المبلغ` أو `!اعطي ID المبلغ`", delete_after=8)
-                return
-            member = await self._resolve_member(ctx, parts[0])
-            if member is None:
-                await message.channel.send("❌ ما لقيتش هاد العضو. استعمل Mention أو ID صحيح.", delete_after=8)
-                return
-            await self._give(ctx, member, "".join(parts[1:]))
-            return
-
-        if command_name == "سحب":
-            if len(parts) < 2:
-                await message.channel.send("❌ الاستعمال: `-سحب @العضو المبلغ` أو `-سحب ID المبلغ`", delete_after=8)
-                return
-            member = await self._resolve_member(ctx, parts[0])
-            if member is None:
-                await message.channel.send("❌ ما لقيتش هاد العضو. استعمل Mention أو ID صحيح.", delete_after=8)
-                return
-            await self._withdraw(ctx, member, "".join(parts[1:]))
-            return
 
         if len(parts) != 1:
             usage = "-بلاك ليست @العضو" if command_name == "بلاك ليست" else "-الغاء بلاك ليست @العضو"
