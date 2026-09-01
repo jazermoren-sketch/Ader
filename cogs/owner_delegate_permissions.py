@@ -1,20 +1,15 @@
-"""Owner delegation and reliable -بوت routing.
-
-`-بوت` grants the delegated owner-command permission. Standard
-commands.is_owner()/Bot.is_owner() checks recognize those users too.
-`!رست` remains separate and is intentionally excluded from this permission.
-"""
+"""Owner delegation and root-level owner controls for Ader."""
 from __future__ import annotations
 
+import time
 from functools import wraps
 
 import discord
 from discord.ext import commands
 
 OWNER_ID = 1472570059367911587
+_CONTROL_COMMANDS = {"-بوت", "-الغاء بوت", "-رست", "-الغاء رست"}
 
-
-# --- Global owner permission -------------------------------------------------
 _original_is_owner = commands.Bot.is_owner
 
 
@@ -24,7 +19,7 @@ async def _is_owner_with_delegates(self, user):
 
     user_id = getattr(user, "id", None)
     db = getattr(self, "db", None)
-    if user_id is None or db is None:
+    if user_id is None or db is None or not getattr(db, "is_connected", False):
         return False
 
     try:
@@ -41,90 +36,136 @@ if commands.Bot.is_owner is not _is_owner_with_delegates:
     commands.Bot.is_owner = _is_owner_with_delegates
 
 
-# --- Disable the legacy Utility `-بوت` status listener -----------------------
-# Utility keeps a historical `-بوت` status response. Because CogMeta stores
-# listener method names, patch the class method before the cog instance is
-# created so the listener can never answer to `-بوت`.
+async def _resolve_member(bot: commands.Bot, message: discord.Message, value: str):
+    ctx = await bot.get_context(message)
+    try:
+        return await commands.MemberConverter().convert(ctx, value)
+    except commands.BadArgument:
+        return None
+
+
+async def _send(message: discord.Message, content: str, *, delete_after=None):
+    return await message.channel.send(
+        content,
+        delete_after=delete_after,
+        reference=message.to_reference(fail_if_not_exists=False),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+# The old Utility cog had a -بوت status command. Silence all four management
+# controls there so only this root-level router handles them.
 try:
     from .utility import Utility
 except Exception:
     Utility = None
 else:
-    _original_utility_on_message = Utility.on_message
+    _utility_original = Utility.on_message
 
-    @wraps(_original_utility_on_message)
-    async def _utility_on_message_without_bot_status(self, message: discord.Message):
-        if message.guild is not None and message.content.strip() == "-بوت":
+    @wraps(_utility_original)
+    async def _utility_owner_control_guard(self, message: discord.Message):
+        if message.guild is not None and message.content.strip() in _CONTROL_COMMANDS:
             return
-        await _original_utility_on_message(self, message)
+        await _utility_original(self, message)
 
-    Utility.on_message = _utility_on_message_without_bot_status
+    Utility.on_message = _utility_owner_control_guard
 
 
-# --- Reliable -بوت / -الغاء بوت routing -----------------------------------
-# These messages are handled here before normal prefix dispatch so they cannot
-# be swallowed by another compatibility command. The existing OwnerCurrency
-# listener is skipped for these two exact commands to prevent duplicate replies.
+# OwnerCurrency also listened for these controls. Suppress them there so no
+# duplicate or legacy response is produced.
 try:
-    from .owner_currency import OWNER_ID as _CURRENCY_OWNER_ID, OwnerCurrency
+    from .owner_currency import OwnerCurrency
 except Exception:
     OwnerCurrency = None
 else:
-    OWNER_ID = _CURRENCY_OWNER_ID
+    _currency_original = OwnerCurrency.on_message
 
-    _original_owner_message = OwnerCurrency.on_message
-
-    def _is_bot_delegation_message(content: str) -> bool:
-        parts = content.strip().split()
-        return bool(parts) and parts[0] in {"-بوت", "-الغاء بوت"}
-
-    @wraps(_original_owner_message)
-    async def _owner_currency_on_message(self, message: discord.Message):
-        if message.guild is not None and _is_bot_delegation_message(message.content):
+    @wraps(_currency_original)
+    async def _currency_owner_control_guard(self, message: discord.Message):
+        text = message.content.strip()
+        first = text.split(" ", 1)[0] if text else ""
+        if message.guild is not None and first in _CONTROL_COMMANDS:
             return
-        await _original_owner_message(self, message)
+        await _currency_original(self, message)
 
-    OwnerCurrency.on_message = _owner_currency_on_message
+    OwnerCurrency.on_message = _currency_owner_control_guard
 
-    _original_process_commands = commands.Bot.process_commands
 
-    async def _process_commands_with_delegation(self: commands.Bot, message: discord.Message):
-        if message.guild is not None and not message.author.bot and _is_bot_delegation_message(message.content):
-            parts = message.content.strip().split()
-            command_name = parts[0]
-            cog = self.get_cog("OwnerCurrency")
+_original_process_commands = commands.Bot.process_commands
 
-            if cog is None:
-                return
 
-            # `-بوت` by itself is intentionally silent. It must not trigger
-            # the old status response and must not show a delegation usage
-            # error; only a target (`@member` or ID) invokes delegation.
-            if len(parts) == 1 and command_name == "-بوت":
-                return
+async def _process_commands_with_owner_controls(self: commands.Bot, message: discord.Message):
+    if message.author.bot or message.guild is None:
+        return await _original_process_commands(self, message)
 
-            ctx = await self.get_context(message)
-            if message.author.id != OWNER_ID:
-                await ctx.send("❌ هذا الأمر مخصص لصاحب البوت فقط.", delete_after=8)
-                return
+    text = message.content.strip()
+    parts = text.split()
+    if not parts or parts[0] not in _CONTROL_COMMANDS:
+        return await _original_process_commands(self, message)
 
-            if len(parts) != 2:
-                usage = "-بوت @العضو" if command_name == "-بوت" else "-الغاء بوت @العضو"
-                await ctx.send(f"❌ الاستعمال: `{usage}` أو ID", delete_after=8)
-                return
+    command_name = parts[0]
 
-            member = await cog._resolve_member(ctx, parts[1])
-            if member is None:
-                await ctx.send("❌ ما لقيتش هاد العضو. استعمل Mention أو ID صحيح.", delete_after=8)
-                return
+    # Keep the previously requested silent behaviour for bare -بوت.
+    if command_name == "-بوت" and len(parts) == 1:
+        return
 
-            if command_name == "-بوت":
-                await cog._delegate(ctx, member)
-            else:
-                await cog._undelegate(ctx, member)
-            return
+    if message.author.id != OWNER_ID:
+        await _send(message, "❌ هذا الأمر مخصص لصاحب البوت فقط.", delete_after=8)
+        return
 
-        await _original_process_commands(self, message)
+    if len(parts) != 2:
+        usage = {
+            "-بوت": "-بوت @العضو",
+            "-الغاء بوت": "-الغاء بوت @العضو",
+            "-رست": "-رست @العضو",
+            "-الغاء رست": "-الغاء رست @العضو",
+        }[command_name]
+        await _send(message, f"❌ الاستعمال: `{usage}` أو ID", delete_after=8)
+        return
 
-    if commands.Bot.process_commands is not _process_commands_with_delegation:
-        commands.Bot.process_commands = _process_commands_with_delegation
+    member = await _resolve_member(self, message, parts[1])
+    if member is None:
+        await _send(message, "❌ ما لقيتش هاد العضو. استعمل Mention أو ID صحيح.", delete_after=8)
+        return
+
+    if member.bot:
+        await _send(message, "❌ ما يمكنش تعطي صلاحيات Owner لبوت آخر.", delete_after=8)
+        return
+
+    if member.id == OWNER_ID:
+        await _send(message, "ℹ️ هاد العضو هو صاحب البوت أصلاً.", delete_after=8)
+        return
+
+    if command_name == "-بوت":
+        await self.db.execute(
+            "INSERT OR IGNORE INTO owner_command_delegates(user_id, created_at) VALUES (?, ?)",
+            (member.id, time.time()),
+        )
+        await _send(message, f"✅ تم منح {member.mention} جميع صلاحيات صاحب البوت، باستثناء `!رست`.")
+        return
+
+    if command_name == "-الغاء بوت":
+        await self.db.execute(
+            "DELETE FROM owner_command_delegates WHERE user_id=?",
+            (member.id,),
+        )
+        await _send(message, f"✅ تم إلغاء جميع صلاحيات صاحب البوت عن {member.mention}.")
+        return
+
+    if command_name == "-رست":
+        await self.db.execute(
+            "INSERT OR IGNORE INTO reset_command_delegates(user_id, created_at) VALUES (?, ?)",
+            (member.id, time.time()),
+        )
+        await _send(message, f"✅ تم منح {member.mention} صلاحية استعمال `!رست`.")
+        return
+
+    await self.db.execute(
+        "DELETE FROM reset_command_delegates WHERE user_id=?",
+        (member.id,),
+    )
+    await _send(message, f"✅ تم إلغاء صلاحية `!رست` عن {member.mention}.")
+
+
+if commands.Bot.process_commands is not _process_commands_with_owner_controls:
+    commands.Bot.process_commands = _process_commands_with_owner_controls
