@@ -41,6 +41,26 @@ if commands.Bot.is_owner is not _is_owner_with_delegates:
     commands.Bot.is_owner = _is_owner_with_delegates
 
 
+# --- Disable the legacy Utility `-بوت` status listener -----------------------
+# Utility keeps a historical `-بوت` status response. Because CogMeta stores
+# listener method names, patch the class method before the cog instance is
+# created so the listener can never answer to `-بوت`.
+try:
+    from .utility import Utility
+except Exception:
+    Utility = None
+else:
+    _original_utility_on_message = Utility.on_message
+
+    @wraps(_original_utility_on_message)
+    async def _utility_on_message_without_bot_status(self, message: discord.Message):
+        if message.guild is not None and message.content.strip() == "-بوت":
+            return
+        await _original_utility_on_message(self, message)
+
+    Utility.on_message = _utility_on_message_without_bot_status
+
+
 # --- Reliable -بوت / -الغاء بوت routing -----------------------------------
 # These messages are handled here before normal prefix dispatch so they cannot
 # be swallowed by another compatibility command. The existing OwnerCurrency
@@ -75,6 +95,12 @@ else:
             cog = self.get_cog("OwnerCurrency")
 
             if cog is None:
+                return
+
+            # `-بوت` by itself is intentionally silent. It must not trigger
+            # the old status response and must not show a delegation usage
+            # error; only a target (`@member` or ID) invokes delegation.
+            if len(parts) == 1 and command_name == "-بوت":
                 return
 
             ctx = await self.get_context(message)
