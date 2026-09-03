@@ -1,7 +1,7 @@
 // Cloudflare Pages runtime configuration.
-// Set API_BASE to the public URL of Ader's FastAPI backend.
+// Ader's current backend public URL is used by default; change it only if the backend domain changes.
 window.ADER_CONFIG = {
-  API_BASE: "https://YOUR-ADER-BACKEND.example.com",
+  API_BASE: "https://nova.hattena.com",
   BRAND: "Ader",
   DEFAULT_LANGUAGE: "ar",
   DEFAULT_THEME: "discord"
