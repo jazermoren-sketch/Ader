@@ -27,29 +27,19 @@ class MemberResetConfirmView(discord.ui.View):
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         current = await self.cog.db.get_balance(self.member.id)
         if current <= 0:
-            await interaction.response.edit_message(
-                content=f"ℹ️ رصيد {self.member.mention} راه أصلاً **0 ANORIS**.",
-                view=None,
-            )
+            await interaction.response.edit_message(content=f"ℹ️ رصيد {self.member.mention} راه أصلاً **0 ANORIS**.", view=None)
             self.stop()
             return
-
         ok = await self.cog.db.remove_balance(self.member.id, self.guild_id, current)
         if not ok:
-            await interaction.response.edit_message(
-                content="❌ وقع خطأ وما تبدلش الرصيد.",
-                view=None,
-            )
+            await interaction.response.edit_message(content="❌ وقع خطأ وما تبدلش الرصيد.", view=None)
             self.stop()
             return
-
         await interaction.response.edit_message(
-            content=(
-                f"✅ **تم تصفير عملة العضو بنجاح**\n"
-                f"👤 العضو: {self.member.mention}\n"
-                f"💰 المبلغ الذي تم تصفيره: **{current:,} ANORIS**\n"
-                f"🪙 الرصيد الجديد: **0 ANORIS**"
-            ),
+            content=(f"✅ **تم تصفير عملة العضو بنجاح**\n"
+                     f"👤 العضو: {self.member.mention}\n"
+                     f"💰 المبلغ الذي تم تصفيره: **{current:,} ANORIS**\n"
+                     f"🪙 الرصيد الجديد: **0 ANORIS**"),
             view=None,
         )
         self.stop()
@@ -91,21 +81,17 @@ class MemberCurrencyReset(commands.Cog):
     async def on_message(self, message: discord.Message):
         if message.author.bot or message.guild is None:
             return
-
         args = self._resolve_prefix_command(message.content)
         if args is None:
             return
-
         if message.author.id != OWNER_ID:
             await message.channel.send("❌ هذا الأمر مخصص لصاحب البوت فقط.", delete_after=8)
             return
-
         ctx = await self.bot.get_context(message)
         parts = args.split()
         if len(parts) != 1:
             await message.channel.send("❌ الاستعمال: `-ظبط @العضو` أو `-ظبط ID`", delete_after=8)
             return
-
         member = await self._resolve_member(ctx, parts[0])
         if member is None:
             await message.channel.send("❌ ما لقيتش هاد العضو. استعمل Mention أو ID صحيح.", delete_after=8)
@@ -116,12 +102,10 @@ class MemberCurrencyReset(commands.Cog):
         if member.id == OWNER_ID:
             await message.channel.send("❌ ما يمكنش تصفير عملة صاحب البوت.", delete_after=8)
             return
-
         balance = await self.db.get_balance(member.id)
         if balance <= 0:
             await message.channel.send(f"ℹ️ رصيد {member.mention} راه أصلاً **0 ANORIS**.", delete_after=8)
             return
-
         view = MemberResetConfirmView(self, message.author.id, member, balance, message.guild.id)
         await message.channel.send(
             f"⚠️ **تأكيد تصفير عملة العضو**\n\n"
@@ -135,7 +119,10 @@ class MemberCurrencyReset(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(MemberCurrencyReset(bot, bot.db))
-    # Keep the main extension list backward-compatible while making the new
-    # platform layer load automatically from an already-loaded core cog.
+    # Keep the existing extension list stable while loading the new platform layer.
     if bot.get_cog("UltimatePlatform") is None:
         await bot.load_extension("cogs.ultimate_platform")
+    # AIChat already exists in the repository but was not part of the active list.
+    # Load it here so /ask and /summarize become available without disturbing old cogs.
+    if bot.get_cog("AIChat") is None:
+        await bot.load_extension("cogs.ai_chat")
