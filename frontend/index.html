@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#5865f2">
+  <meta name="description" content="Ader — Discord server control center">
+  <title>Ader Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="toast-root" class="toast-root"></div>
+  <div id="loading" class="loading-screen"><div class="loader"></div><span>جاري تشغيل لوحة Ader...</span></div>
+
+  <section id="login-screen" class="auth-screen hidden">
+    <div class="auth-card">
+      <div class="brand-mark">A</div>
+      <div class="eyebrow">ADER CONTROL CENTER</div>
+      <h1>تحكم في سيرفرك من مكان واحد</h1>
+      <p>سجل الدخول بواسطة Discord لإدارة السيرفرات اللي عندك فيها صلاحية Administrator أو Manage Server.</p>
+      <button id="login-btn" class="btn btn-primary btn-lg"><span>◈</span> تسجيل الدخول بواسطة Discord</button>
+      <div class="auth-note">آمن · OAuth2 · بدون كلمة سر Discord</div>
+    </div>
+  </section>
+
+  <div id="app" class="app hidden">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-top">
+        <div class="brand"><span class="brand-dot">A</span><span>Ader</span></div>
+        <button id="mobile-close" class="icon-btn mobile-only" aria-label="إغلاق القائمة">×</button>
+      </div>
+      <div class="workspace">
+        <div class="workspace-avatar" id="workspace-avatar">A</div>
+        <div class="workspace-copy"><b id="workspace-name">Ader</b><span>Server Dashboard</span></div>
+      </div>
+      <nav class="nav" id="nav">
+        <div class="nav-label">الرئيسية</div>
+        <button class="nav-item active" data-page="overview"><span>⌂</span> Overview</button>
+        <button class="nav-item" data-page="servers"><span>▦</span> السيرفرات</button>
+        <div class="nav-label">إدارة السيرفر</div>
+        <button class="nav-item" data-page="commands"><span>⌘</span> الأوامر</button>
+        <button class="nav-item" data-page="shortcuts"><span>↯</span> Shortcuts</button>
+        <button class="nav-item" data-page="tickets"><span>▣</span> Tickets</button>
+        <button class="nav-item" data-page="teams"><span>♙</span> Teams</button>
+        <button class="nav-item" data-page="resources"><span>◫</span> القنوات والرتب</button>
+        <div class="nav-label">النظام</div>
+        <button class="nav-item" data-page="settings"><span>⚙</span> Settings</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="status"><i></i><span>Ader Online</span></div>
+        <button id="logout-btn" class="logout">↪ تسجيل الخروج</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button id="mobile-menu" class="icon-btn mobile-only" aria-label="فتح القائمة">☰</button>
+        <div class="breadcrumb"><span>Ader</span><b>/</b><strong id="page-title">Overview</strong></div>
+        <div class="top-actions">
+          <button id="refresh-btn" class="icon-btn" title="تحديث">↻</button>
+          <button id="theme-btn" class="icon-btn" title="تغيير الثيم">◐</button>
+          <button id="lang-btn" class="lang-btn">AR</button>
+          <div class="user-menu"><div class="user-avatar" id="user-avatar">U</div><div><b id="user-name">Discord User</b><span>Administrator</span></div></div>
+        </div>
+      </header>
+
+      <div class="content">
+        <div id="server-strip" class="server-strip hidden">
+          <div class="server-current"><div id="server-icon" class="server-icon">A</div><div><small>السيرفر الحالي</small><b id="server-name">اختار سيرفر</b></div></div>
+          <select id="server-select" aria-label="اختيار السيرفر"></select>
+        </div>
+        <div id="page-root"></div>
+      </div>
+    </main>
+  </div>
+
+  <div id="modal-root"></div>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
