@@ -135,3 +135,7 @@ class MemberCurrencyReset(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(MemberCurrencyReset(bot, bot.db))
+    # Keep the main extension list backward-compatible while making the new
+    # platform layer load automatically from an already-loaded core cog.
+    if bot.get_cog("UltimatePlatform") is None:
+        await bot.load_extension("cogs.ultimate_platform")
