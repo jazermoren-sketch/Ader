@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import RedirectResponse
 
 from web import dashboard_app as base
 
@@ -20,8 +21,11 @@ class CloudflareSessionBridge(BaseHTTPMiddleware):
     """Make the backend session usable by a separately hosted HTTPS frontend."""
 
     async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
         frontend = os.getenv("DASHBOARD_FRONTEND_URL", "").strip().rstrip("/")
+        if frontend and request.url.path == "/" and request.method == "GET":
+            return RedirectResponse(frontend + "/", status_code=302)
+
+        response = await call_next(request)
         if frontend and request.url.path in {"/callback", "/logout"} and response.status_code in {302, 303, 307, 308}:
             location = response.headers.get("location", "")
             if location == "/" or location == "":
