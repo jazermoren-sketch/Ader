@@ -1,16 +1,18 @@
 """Canonical dashboard wrapper.
 
-The original dashboard backend stays the API source of truth; the hardened
-middleware refreshes Discord OAuth permissions and serves the resilient tabbed
-UI. This avoids a second dashboard server or duplicate API implementation.
+The original dashboard backend is the single source of truth.  The wrapper
+intentionally does not add another HTTP middleware layer here: the previous
+hardening middleware accessed ``request.session`` before Starlette's
+``SessionMiddleware`` was guaranteed to be in scope, which caused the
+``/api/guilds`` request to return HTTP 500 on the dashboard server list.
+
+Authentication and guild-management checks remain enforced by the canonical
+``dashboard_app`` routes themselves.
 """
 from __future__ import annotations
 
 from web import dashboard_app as base
-from web.dashboard_hardening import install_dashboard_hardening
 
 
 def create_app(bot):
-    app = base.create_app(bot)
-    install_dashboard_hardening(app, bot)
-    return app
+    return base.create_app(bot)
